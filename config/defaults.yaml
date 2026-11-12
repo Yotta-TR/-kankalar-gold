@@ -1,0 +1,40 @@
+app:
+  name: KANKALAR GOLD AI
+  environment: research
+  safe_mode: true
+  timezone_storage: UTC
+  language: ar
+
+instrument:
+  logical_name: GOLD_USD
+  broker_symbol: null
+  source: mock
+
+timeframes:
+  context: [D1, H4]
+  bias: [H1]
+  setup: [M15]
+  confirmation: [M5]
+  diagnostics: [M1]
+
+signals:
+  allow_live_trading: false
+  require_closed_bars: true
+  allow_probability_display: false
+  duplicate_suppression: true
+  default_no_trade_on_uncertainty: true
+
+risk:
+  mode: virtual
+  max_risk_per_trade: null
+  max_daily_loss: null
+  max_drawdown: null
+
+models:
+  baseline: logistic_regression
+  tree_candidates: [random_forest, xgboost, lightgbm]
+  advanced_regime_candidates: [hmm, markov_switching]
+  deep_learning_enabled: false
+
+notifications:
+  telegram_enabled: false

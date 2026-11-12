@@ -1,0 +1,3 @@
+# Broker symbols and contract specifications must be discovered and verified
+# from a future, explicitly reviewed read-only data adapter.
+instruments: []
