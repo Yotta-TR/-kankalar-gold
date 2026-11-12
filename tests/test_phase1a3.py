@@ -23,7 +23,7 @@ from kankalar_gold_ai.data.pipeline import (
     HistoricalDataQualityError,
 )
 from kankalar_gold_ai.data.provider_manager import ProviderConfig, ProviderManager
-from kankalar_gold_ai.storage.sqlite import SQLitePersistence
+from kankalar_gold_ai.storage.sqlite import MigrationError, SQLitePersistence
 from tests.fixtures.market_data import SYNTHETIC_SOURCE
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -43,6 +43,156 @@ ALIGNED_BARS = tuple(
     )
     for index in range(3)
 )
+
+LEGACY_PHASE0_SCHEMA = """
+    CREATE TABLE market_bars (
+        instrument TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        timestamp_utc TEXT NOT NULL,
+        open REAL NOT NULL,
+        high REAL NOT NULL,
+        low REAL NOT NULL,
+        close REAL NOT NULL,
+        volume REAL,
+        source TEXT NOT NULL,
+        PRIMARY KEY (instrument, timeframe, timestamp_utc, source)
+    );
+    CREATE TABLE study_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        study_id TEXT NOT NULL,
+        version TEXT NOT NULL,
+        instrument TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        as_of_utc TEXT NOT NULL,
+        status TEXT NOT NULL,
+        state TEXT,
+        value REAL,
+        normalized_value REAL,
+        direction TEXT NOT NULL,
+        uncertainty REAL,
+        inputs_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        limitations_json TEXT NOT NULL,
+        data_snapshot_id TEXT
+    );
+    CREATE TABLE signal_events (
+        event_id TEXT PRIMARY KEY,
+        signal_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        occurred_at_utc TEXT NOT NULL,
+        reason_code TEXT NOT NULL
+    );
+"""
+LEGACY_PHASE0_TABLES = {"market_bars", "study_results", "signal_events"}
+
+
+def _create_legacy_phase0_database(db_path: Path) -> None:
+    """Create the exact unversioned schema from the original Phase 0 implementation."""
+    bar = ALIGNED_BARS[0]
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.executescript(LEGACY_PHASE0_SCHEMA)
+        connection.execute(
+            "INSERT INTO market_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                bar.instrument,
+                bar.timeframe,
+                bar.timestamp_utc.isoformat().replace("+00:00", "Z"),
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+                bar.source,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO study_results VALUES (
+                7, 'legacy.study', '0.1.0', 'TEST_GOLD', 'M5',
+                '2026-01-01T12:00:00Z', 'AVAILABLE', 'legacy-state',
+                1.25, NULL, 'NEUTRAL', 0.1, '{"window": 2}',
+                '["legacy evidence"]', '["legacy limitation"]', 'legacy-snapshot'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO signal_events VALUES (
+                'legacy-event', 'legacy-signal', 'CREATED',
+                '2026-01-01T12:00:00Z', 'legacy_reason'
+            )
+            """
+        )
+
+
+def _legacy_phase0_records(db_path: Path) -> dict[str, list[tuple[object, ...]]]:
+    with sqlite3.connect(str(db_path)) as connection:
+        return {
+            table: connection.execute(f"SELECT * FROM {table}").fetchall()
+            for table in sorted(LEGACY_PHASE0_TABLES)
+        }
+
+
+def _table_names(db_path: Path) -> set[str]:
+    with sqlite3.connect(str(db_path)) as connection:
+        return {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+
+
+def _assert_injected_migration_failure_rolls_back(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    migration_method: str,
+) -> None:
+    _create_legacy_phase0_database(db_path)
+    original_records = _legacy_phase0_records(db_path)
+    original_migration = getattr(SQLitePersistence, migration_method)
+
+    def fail_after_schema_work(
+        persistence: SQLitePersistence, connection: sqlite3.Connection
+    ) -> None:
+        original_migration(persistence, connection)
+        raise sqlite3.OperationalError("injected migration failure")
+
+    monkeypatch.setattr(SQLitePersistence, migration_method, fail_after_schema_work)
+    persistence = SQLitePersistence(db_path)
+    with pytest.raises(MigrationError, match="all migration changes rolled back"):
+        persistence.initialize()
+
+    assert _table_names(db_path) == LEGACY_PHASE0_TABLES
+    assert _legacy_phase0_records(db_path) == original_records
+    with sqlite3.connect(str(db_path)) as connection:
+        indexes = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    assert indexes == []
+
+    monkeypatch.undo()
+    persistence.initialize()
+    assert _legacy_phase0_records(db_path) == original_records
+    assert {
+        "schema_version",
+        "instrument_specifications",
+        "market_ticks",
+        "market_quotes",
+        "data_quality_events",
+        "provider_health_events",
+    } <= _table_names(db_path)
+    with sqlite3.connect(str(db_path)) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchall() == [
+            (SQLitePersistence.SCHEMA_VERSION,)
+        ]
+
+    persistence.initialize()
+    assert _legacy_phase0_records(db_path) == original_records
+    with sqlite3.connect(str(db_path)) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchall() == [
+            (SQLitePersistence.SCHEMA_VERSION,)
+        ]
 
 
 class TestProviderManager:
@@ -529,6 +679,24 @@ class TestSQLitePersistence:
         assert version == SQLitePersistence.SCHEMA_VERSION
         conn.close()
 
+    def test_initialize_rejects_newer_schema_without_downgrading(self, db_path: Path) -> None:
+        persistence = SQLitePersistence(db_path)
+        persistence.initialize()
+
+        with sqlite3.connect(str(db_path)) as connection:
+            connection.execute(
+                "UPDATE schema_version SET version = ?",
+                (SQLitePersistence.SCHEMA_VERSION + 1,),
+            )
+
+        with pytest.raises(MigrationError, match="newer than supported"):
+            persistence.initialize()
+
+        with sqlite3.connect(str(db_path)) as connection:
+            assert connection.execute("SELECT version FROM schema_version").fetchall() == [
+                (SQLitePersistence.SCHEMA_VERSION + 1,)
+            ]
+
     def test_phase_0_data_preserved_after_migration(self, db_path: Path) -> None:
         persistence = SQLitePersistence(db_path)
         persistence.initialize()
@@ -547,96 +715,8 @@ class TestSQLitePersistence:
     def test_genuine_phase0_database_migration_preserves_every_legacy_record(
         self, db_path: Path
     ) -> None:
-        legacy_schema = """
-            CREATE TABLE market_bars (
-                instrument TEXT NOT NULL,
-                timeframe TEXT NOT NULL,
-                timestamp_utc TEXT NOT NULL,
-                open REAL NOT NULL,
-                high REAL NOT NULL,
-                low REAL NOT NULL,
-                close REAL NOT NULL,
-                volume REAL,
-                source TEXT NOT NULL,
-                PRIMARY KEY (instrument, timeframe, timestamp_utc, source)
-            );
-            CREATE TABLE study_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                study_id TEXT NOT NULL,
-                version TEXT NOT NULL,
-                instrument TEXT NOT NULL,
-                timeframe TEXT NOT NULL,
-                as_of_utc TEXT NOT NULL,
-                status TEXT NOT NULL,
-                state TEXT,
-                value REAL,
-                normalized_value REAL,
-                direction TEXT NOT NULL,
-                uncertainty REAL,
-                inputs_json TEXT NOT NULL,
-                evidence_json TEXT NOT NULL,
-                limitations_json TEXT NOT NULL,
-                data_snapshot_id TEXT
-            );
-            CREATE TABLE signal_events (
-                event_id TEXT PRIMARY KEY,
-                signal_id TEXT NOT NULL,
-                state TEXT NOT NULL,
-                occurred_at_utc TEXT NOT NULL,
-                reason_code TEXT NOT NULL
-            );
-        """
-        with sqlite3.connect(str(db_path)) as connection:
-            connection.executescript(legacy_schema)
-            bar = ALIGNED_BARS[0]
-            connection.execute(
-                """
-                INSERT INTO market_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    bar.instrument,
-                    bar.timeframe,
-                    bar.timestamp_utc.isoformat().replace("+00:00", "Z"),
-                    bar.open,
-                    bar.high,
-                    bar.low,
-                    bar.close,
-                    bar.volume,
-                    bar.source,
-                ),
-            )
-            connection.execute(
-                """
-                INSERT INTO study_results VALUES (
-                    7, 'legacy.study', '0.1.0', 'TEST_GOLD', 'M5',
-                    '2026-01-01T12:00:00Z', 'AVAILABLE', 'legacy-state',
-                    1.25, NULL, 'NEUTRAL', 0.1, '{"window": 2}',
-                    '["legacy evidence"]', '["legacy limitation"]', 'legacy-snapshot'
-                )
-                """
-            )
-            connection.execute(
-                """
-                INSERT INTO signal_events VALUES (
-                    'legacy-event', 'legacy-signal', 'CREATED',
-                    '2026-01-01T12:00:00Z', 'legacy_reason'
-                )
-                """
-            )
-
-        def legacy_records() -> dict[str, list[tuple[object, ...]]]:
-            with sqlite3.connect(str(db_path)) as connection:
-                return {
-                    table: connection.execute(f"SELECT * FROM {table}").fetchall()
-                    for table in ("market_bars", "study_results", "signal_events")
-                }
-
-        original_records = legacy_records()
-        assert set(original_records) == {
-            "market_bars",
-            "study_results",
-            "signal_events",
-        }
+        _create_legacy_phase0_database(db_path)
+        original_records = _legacy_phase0_records(db_path)
 
         persistence = SQLitePersistence(db_path)
         persistence.initialize()
@@ -648,7 +728,7 @@ class TestSQLitePersistence:
             }
             version = connection.execute("SELECT version FROM schema_version").fetchone()[0]
 
-        assert original_records == legacy_records()
+        assert original_records == _legacy_phase0_records(db_path)
         assert version == SQLitePersistence.SCHEMA_VERSION
         assert {
             "instrument_specifications",
@@ -659,8 +739,18 @@ class TestSQLitePersistence:
         } <= tables
 
         persistence.initialize()
-        assert original_records == legacy_records()
+        assert original_records == _legacy_phase0_records(db_path)
         with sqlite3.connect(str(db_path)) as connection:
             assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == (
                 SQLitePersistence.SCHEMA_VERSION
             )
+
+    def test_phase0_migration_failure_rolls_back_and_retries(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _assert_injected_migration_failure_rolls_back(db_path, monkeypatch, "_migrate_to_version_1")
+
+    def test_phase1a_migration_failure_rolls_back_entire_upgrade_and_retries(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _assert_injected_migration_failure_rolls_back(db_path, monkeypatch, "_migrate_to_version_2")

@@ -63,8 +63,9 @@ before adding any broker or messaging integration.
 - `adapters.mock`: in-memory test provider; no network access.
 - `adapters.mt5`: injected read-only terminal adapter; Windows only, disabled
   by default.
-- `storage`: append-oriented SQLite persistence with versioned migrations; Phase 0
-  and Phase 1A data preserved.
+- `storage`: append-oriented SQLite persistence with versioned migrations. Schema
+  changes and version updates run in one explicit transaction; a failed migration
+  rolls back the full upgrade and preserves Phase 0 data.
 - `observability`: UTC logging with credential redaction.
 - `config`: validated defaults for research-only use.
 - `docs`: data dictionary, study catalogue, model card, backtest protocol,

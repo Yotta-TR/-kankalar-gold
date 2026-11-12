@@ -1,12 +1,12 @@
-# Phase 1A.3 Completion Report
+# Phase 1A Completion Report
 
 ## Overview
 
-Phase 1A.3 implements the data pipeline and persistence layer for KANKALAR GOLD AI, including provider management, historical data retrieval, SQLite persistence with versioned migrations, and data quality integration.
+Phase 1A implements the data pipeline and persistence layer for KANKALAR GOLD AI, including provider management, historical data retrieval, SQLite persistence with versioned migrations, and data-quality enforcement.
 
-**Status**: ✅ COMPLETE
+**Status**: ✅ COMPLETE after Phase 1A.4 migration-atomicity hardening
 
-All 27 Phase 1A.3 tests pass. All 83 total tests pass (including 56 Phase 0 tests). No linting errors.
+Migration DDL and schema-version updates are applied in a single explicit SQLite transaction. Failure-injection tests cover rollback during both upgrade steps from a genuine original Phase 0 schema. See final validation results below.
 
 ## Deliverables
 
@@ -25,7 +25,7 @@ All 27 Phase 1A.3 tests pass. All 83 total tests pass (including 56 Phase 0 test
 - `ProviderManager` class handles provider initialization, lifecycle, and health checks
 - Mock provider is always available with optional bars
 - MT5 provider is loaded lazily only when explicitly requested, Windows-only
-- `health()` method returns `MarketDataHealth` with status (AVAILABLE, UNAVAILABLE) and detail messages
+- `health()` method returns `MarketDataHealth` with a `DataStatus` and detail message
 - `provider()` raises RuntimeError if provider initialization failed
 
 **Test Coverage**:
@@ -56,7 +56,7 @@ All 27 Phase 1A.3 tests pass. All 83 total tests pass (including 56 Phase 0 test
 - `check_coverage()` reports completeness status
 - `latest_complete_bar()` returns the most recent fully-formed bar
 - All timestamps are UTC-normalized using `as_utc()` contract function
-- Source timestamps (open_utc, close_utc) and retrieval timestamps (fetched_at_utc) are preserved
+- Contract timestamps are UTC-normalized; source bar/tick/quote timestamps and retrieval timestamps are preserved where the contract provides them
 - Retrieval respects timeframe constraints and never invents data
 
 **Test Coverage**:
@@ -93,46 +93,40 @@ All 27 Phase 1A.3 tests pass. All 83 total tests pass (including 56 Phase 0 test
 - `SCHEMA_VERSION = 2` tracks schema state
 - `schema_version` table stores current version
 - `_get_version()` and `_set_version()` manage version lifecycle
-- Multiple migrations can be applied in sequence
+- Only sequential upgrades are applied; a database newer than the supported version is rejected
 
 **Phase 0 Schema** (preserved):
-- `market_bars` (symbol, source, timeframe, open_utc, close_utc)
-- `study_results` (study_id, version, instrument, timeframe, as_of_utc)
-- `signal_events` (event_id, instrument, signal, direction)
+- `market_bars` (instrument, timeframe, timestamp_utc, OHLCV, source)
+- `study_results` (study metadata, values, inputs, evidence, limitations)
+- `signal_events` (event and signal identifiers, state, occurrence time, reason)
 
 **Phase 1A Schema** (Version 2):
-- `instrument_specifications` (symbol, source, fetched_at_utc) — instrument metadata
-- `market_ticks` (symbol, source, timestamp_utc) — tick-level price/volume data
-- `market_quotes` (symbol, source, timestamp_utc) — current bid/ask snapshots
-- `data_quality_events` (symbol, source, timestamp_utc, status) — VALID/STALE/INSUFFICIENT_DATA/UNAVAILABLE/ERROR
+- `instrument_specifications` (symbol, source, retrieved_at_utc) — instrument metadata
+- `market_ticks` (instrument, timestamp_utc, source) — tick-level price/volume data
+- `market_quotes` (instrument, timestamp_utc, source) — quote snapshots
+- `data_quality_events` (instrument, timeframe, timestamp_utc, status, reasons, source)
 - `provider_health_events` (source, checked_at_utc, status, detail) — provider availability and error context
 
 **Migration Strategy**:
-- `_migrate_to_version_1()` converts Phase 0 schema to versioned format
+- `_migrate_to_version_1()` creates missing version metadata and Phase 0 indexes without rewriting Phase 0 records
 - `_migrate_to_version_2()` adds Phase 1A tables
-- Both migrations are idempotent (safe to run multiple times)
-- Migrations run automatically on first database access
-- All tables use composite primary keys for source identity
-- Appropriate indexes on symbol, source, timestamp for query performance
+- `initialize()` starts one explicit `BEGIN IMMEDIATE` transaction before checking the schema version
+- DDL and each sequential version update commit together; any failure rolls back the full upgrade and raises `MigrationError`
+- DDL uses individual `connection.execute()` statements, not `executescript()`
+- Repeated initialization is safe; failed upgrades from either supported step are retryable
+- Source-aware composite keys are used for bars, ticks, and quotes
 
 **Save Methods**:
 - `save_instrument_specification(spec)` — append-only instrument metadata
-- `save_market_tick(tick)` — append tick data with source preservation
+- `save_market_ticks(ticks)` — append tick data with source preservation
 - `save_market_quote(quote)` — append quote snapshots
-- `save_data_quality_event(quality)` — append quality status events
-- `save_provider_health(health)` — append provider health records
+- `save_data_quality_event(...)` — append quality status events
+- `save_provider_health_event(health)` — append provider health records
 
 **Test Coverage**:
-- Database migration from Phase 0 to Version 1
-- Repeat migration (idempotency)
-- Phase 0 data preservation
-- Phase 1A schema creation
-- Historical data persistence
-- Tick persistence
-- Quote persistence
-- Data source separation
-- Transaction rollback
-- Composite key uniqueness
+- Genuine Phase 0 database migration and idempotency
+- Injected failures during version 1 and version 2 migration, complete rollback, and successful retry
+- Persistence-level source separation and duplicate rejection for bars, ticks, and quotes
 
 ### 4. Data Quality Integration (`src/kankalar_gold_ai/data/quality.py`)
 
@@ -145,66 +139,30 @@ All 27 Phase 1A.3 tests pass. All 83 total tests pass (including 56 Phase 0 test
 **Implementation**:
 - Data quality module already provides `DataQualityReport` with status enum
 - Status values: VALID, STALE, INSUFFICIENT_DATA, UNAVAILABLE, ERROR
-- Pipeline and persistence layers pass quality reports through without modification
-- Quality events are logged to SQLite for audit trail
-- Weekends and market closures are handled by provider (not classified as errors by pipeline)
+- Historical retrieval raises a typed `HistoricalDataQualityError` for any non-VALID result and preserves the report
+- `latest_complete_bar()` validates the returned bar before exposing it
+- Quality events can be persisted to SQLite for an audit trail
+- Gaps are not automatically assumed to occur during open sessions; a caller-supplied calendar is needed to classify missing bars
 
 **Test Coverage**:
-- Data quality status flow through pipeline
+- Fail-closed retrieval for STALE, ERROR, INSUFFICIENT_DATA, and UNAVAILABLE reports
 - Quality event persistence
 
 ## Test Results
 
-### Phase 1A.3 Tests (27 tests)
+The final focused migration tests passed: **6 passed, 34 deselected**. Final full-suite and static-analysis results:
 
-**TestProviderManager** (8 tests):
-- `test_select_mock_provider` ✅
-- `test_select_mock_provider_with_bars` ✅
-- `test_select_mt5_provider_windows_unavailable` ✅
-- `test_select_mt5_provider_invalid_symbol` ✅
-- `test_missing_provider` ✅
-- `test_provider_health_mock_available` ✅
-- `test_provider_health_mock_unavailable_no_provider` ✅
-- `test_provider_health_mt5_unavailable` ✅
-
-**TestHistoricalDataPipeline** (9 tests):
-- `test_retrieve_bars_empty` ✅
-- `test_retrieve_bars_within_bounds` ✅
-- `test_retrieve_bars_max_days_exceeded` ✅
-- `test_validate_bars_empty` ✅
-- `test_validate_bars_duplicates` ✅
-- `test_validate_bars_out_of_order` ✅
-- `test_validate_bars_missing_intervals` ✅
-- `test_latest_complete_bar` ✅
-- `test_check_coverage` ✅
-
-**TestSQLitePersistence** (10 tests):
-- `test_migrate_from_phase0_to_version1` ✅
-- `test_repeat_migration_idempotent` ✅
-- `test_save_historical_bars` ✅
-- `test_save_instrument_specification` ✅
-- `test_save_market_ticks` ✅
-- `test_save_market_quotes` ✅
-- `test_save_quality_events` ✅
-- `test_save_provider_health` ✅
-- `test_data_source_separation` ✅
-- `test_transaction_rollback` ✅
-
-### Phase 0 Tests (56 tests)
-
-All Phase 0 tests continue to pass, confirming backward compatibility.
-
-### Total: 93/93 tests passing ✅
+- `python -m pytest tests/ -q --tb=short` — **96 passed**
+- `ruff check src/ tests/` — passed
+- `ruff format --check src/ tests/` — 39 files already formatted
+- `mypy src/kankalar_gold_ai` — success, 0 issues in 31 source files
+- `git diff --check` — passed
 
 ## Code Quality
 
-- ✅ No linting errors (ruff check)
-- ✅ All imports organized and sorted
-- ✅ All functions documented with docstrings
-- ✅ No unused imports or variables
-- ✅ Type hints complete (Python 3.11+ compatible)
-- ✅ Datetime handling uses UTC-aware timezone
-- ✅ No hardcoded credentials or secrets
+- ✅ Ruff lint and formatting checks pass
+- ✅ Mypy reports no issues in the package
+- ✅ All persisted contract timestamps are normalized to UTC
 
 ## Architecture Decisions
 
@@ -225,9 +183,9 @@ All Phase 0 tests continue to pass, confirming backward compatibility.
 - Parameterized SQL prevents injection attacks
 
 ### Data Quality
-- Quality status flows through entire pipeline without transformation
-- Events are logged for audit trail
-- No automatic classification of market closures
+- Non-VALID historical reports are rejected with their status and reasons preserved
+- Quality events can be stored for an audit trail
+- No automatic classification of market closures as data gaps
 
 ## Limitations & Notes
 
@@ -238,35 +196,32 @@ All Phase 0 tests continue to pass, confirming backward compatibility.
 3. **No Telegram**: No messaging integration
 4. **No ML Models**: No technical studies or automated analysis in this phase
 5. **Max 366 Days**: Historical retrieval is bounded to prevent resource exhaustion
+6. **No downstream analysis consumer**: Phase 1A exposes only validated historical bars; no study or analysis consumer exists yet
+7. **No built-in market calendar**: Gap classification during scheduled closures requires an optional caller-provided calendar
 
 ### Testing Scope
 
 - All tests use deterministic synthetic data with fixed timestamps
-- No network access (Mock provider only in tests)
-- No file system persistence required (in-memory SQLite)
-- No process spawning or system calls
+- No network access; provider tests use mocks/fakes
+- SQLite persistence tests use temporary local databases
 
 ### Data Quality Notes
 
 - Weekends and market closures are not automatically classified as errors
 - Provider health is independent of data quality
-- Quality events are logged for post-hoc analysis
+- Historical APIs reject non-VALID data before returning bars
 
-## Files Modified & Created
+## Phase 1A Implementation Files
 
-### Created (New Components):
+### Added components:
 - `src/kankalar_gold_ai/data/provider_manager.py`
 - `src/kankalar_gold_ai/data/pipeline.py`
 - `tests/test_phase1a3.py`
 
-### Modified (Existing Components):
-- `src/kankalar_gold_ai/storage/sqlite.py` — Added versioned migrations, Phase 1A schema, save methods
-- `README.md` — Updated documentation to reflect Phase 1A.3 completion
-
-### Unchanged (Preserved):
-- All Phase 0 code and tests
-- All Phase 1A.1 adapter code
-- All contracts and safety policies
+### Extended components:
+- `src/kankalar_gold_ai/storage/sqlite.py` — Versioned schema, persistence methods, and atomic migration handling
+- `tests/test_phase1a3.py` — Genuine legacy migration, failure-injection rollback, source isolation, and persistence coverage
+- `README.md` and this report — Updated Phase 1A implementation and limitations
 
 ## Acceptance Criteria ✅
 
@@ -277,15 +232,17 @@ All Phase 0 tests continue to pass, confirming backward compatibility.
 - ✅ UTC normalization and timestamp preservation
 - ✅ Duplicate and out-of-order detection
 - ✅ SQLite migrations are versioned, idempotent, and safe
-- ✅ Phase 0 data preserved through migrations
+- ✅ Phase 0 records survive successful and injected-failure migrations
+- ✅ All migration DDL and version changes share one explicit transaction
 - ✅ Parameterized SQL with transactions
-- ✅ Data quality status flows (VALID, STALE, INSUFFICIENT_DATA, UNAVAILABLE, ERROR)
+- ✅ Non-VALID historical data is rejected with a typed diagnostic report
 - ✅ No automatic market-closure misclassification
 - ✅ Comprehensive testing with deterministic fixtures
-- ✅ All 27 Phase 1A.3 tests pass
-- ✅ All 83 total tests pass
-- ✅ No linting errors
 - ✅ No external connections (no broker, no MT5, no Telegram)
+
+## Final Validation
+
+The full test suite and all requested static checks pass; exact results are listed under Test Results.
 
 ## Next Steps (Phase 1B)
 
@@ -305,7 +262,6 @@ Phase 1A provides the solid foundation:
 ---
 
 **Report Date**: 2026-11-12
-**Phase**: 1A.3
+**Phase**: 1A
 **Status**: Complete
-**Test Results**: 93/93 passing
-**Code Quality**: No errors
+**Code Quality**: Ruff and mypy pass

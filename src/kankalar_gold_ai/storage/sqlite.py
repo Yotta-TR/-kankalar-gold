@@ -33,41 +33,87 @@ class SQLitePersistence:
 
     def _get_version(self, connection: sqlite3.Connection) -> int:
         """Get the current schema version; default to 0 if not initialized."""
-        try:
-            cursor = connection.execute("SELECT version FROM schema_version LIMIT 1")
-            row = cursor.fetchone()
-            return row[0] if row else 0
-        except sqlite3.OperationalError:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
+        ).fetchone()
+        if table is None:
             return 0
+        rows = connection.execute("SELECT version FROM schema_version").fetchall()
+        if len(rows) > 1:
+            raise MigrationError("schema_version contains multiple version records")
+        if not rows:
+            return 0
+        version = rows[0][0]
+        if not isinstance(version, int) or version < 0:
+            raise MigrationError(f"Invalid SQLite schema version: {version!r}")
+        return version
 
     def _set_version(self, connection: sqlite3.Connection, version: int) -> None:
-        """Update the schema version."""
-        connection.execute("DELETE FROM schema_version")
-        connection.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+        """Advance the schema version exactly one step without replacing it."""
+        current = self._get_version(connection)
+        if version != current + 1:
+            raise MigrationError(
+                f"Cannot advance SQLite schema version from {current} to {version}"
+            )
+        if current == 0:
+            connection.execute(
+                "INSERT INTO schema_version (version) VALUES (?)",
+                (version,),
+            )
+            return
+        cursor = connection.execute(
+            "UPDATE schema_version SET version = ? WHERE version = ?",
+            (version, current),
+        )
+        if cursor.rowcount != 1:
+            raise MigrationError("SQLite schema version changed during migration")
 
     def initialize(self) -> None:
         """
         Create or migrate the schema without deleting existing data.
 
-        Migrations are idempotent and versioned.
+        All migration steps and version updates commit or roll back together.
         """
         with self._connection() as connection:
-            current = self._get_version(connection)
+            step = "starting transaction"
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                current = self._get_version(connection)
+                if current > self.SCHEMA_VERSION:
+                    raise MigrationError(
+                        f"Database schema version {current} is newer than supported "
+                        f"version {self.SCHEMA_VERSION}"
+                    )
 
-            if current == 0:
-                self._migrate_to_version_1(connection)
-                self._set_version(connection, 1)
-            if current < 2:
-                self._migrate_to_version_2(connection)
-                self._set_version(connection, 2)
+                migrations = {
+                    1: self._migrate_to_version_1,
+                    2: self._migrate_to_version_2,
+                }
+                while current < self.SCHEMA_VERSION:
+                    target = current + 1
+                    step = f"version {target}"
+                    migrations[target](connection)
+                    self._set_version(connection, target)
+                    current = target
+                connection.commit()
+            except Exception as error:
+                if connection.in_transaction:
+                    connection.rollback()
+                if isinstance(error, MigrationError):
+                    raise
+                raise MigrationError(
+                    f"SQLite migration failed during {step}; all migration changes rolled back"
+                ) from error
 
     def _migrate_to_version_1(self, connection: sqlite3.Connection) -> None:
         """Phase 0 schema: study results, signal events, and market bars."""
-        connection.executescript(
+        statements = (
             """
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
-            );
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS market_bars (
                 instrument TEXT NOT NULL,
                 timeframe TEXT NOT NULL,
@@ -79,7 +125,9 @@ class SQLitePersistence:
                 volume REAL,
                 source TEXT NOT NULL,
                 PRIMARY KEY (instrument, timeframe, timestamp_utc, source)
-            );
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS study_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 study_id TEXT NOT NULL,
@@ -97,26 +145,36 @@ class SQLitePersistence:
                 evidence_json TEXT NOT NULL,
                 limitations_json TEXT NOT NULL,
                 data_snapshot_id TEXT
-            );
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS signal_events (
                 event_id TEXT PRIMARY KEY,
                 signal_id TEXT NOT NULL,
                 state TEXT NOT NULL,
                 occurred_at_utc TEXT NOT NULL,
                 reason_code TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_market_bars_instrument_timeframe
-                ON market_bars(instrument, timeframe);
-            CREATE INDEX IF NOT EXISTS idx_study_results_study_id
-                ON study_results(study_id);
-            CREATE INDEX IF NOT EXISTS idx_signal_events_signal_id
-                ON signal_events(signal_id);
+            )
+            """,
             """
+            CREATE INDEX IF NOT EXISTS idx_market_bars_instrument_timeframe
+                ON market_bars(instrument, timeframe)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_study_results_study_id
+                ON study_results(study_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_signal_events_signal_id
+                ON signal_events(signal_id)
+            """,
         )
+        for statement in statements:
+            connection.execute(statement)
 
     def _migrate_to_version_2(self, connection: sqlite3.Connection) -> None:
         """Phase 1A schema: instrument specs, ticks, quotes, and health events."""
-        connection.executescript(
+        statements = (
             """
             CREATE TABLE IF NOT EXISTS instrument_specifications (
                 symbol TEXT NOT NULL,
@@ -136,7 +194,9 @@ class SQLitePersistence:
                 currency_profit TEXT,
                 currency_margin TEXT,
                 PRIMARY KEY (symbol, source, retrieved_at_utc)
-            );
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS market_ticks (
                 instrument TEXT NOT NULL,
                 timestamp_utc TEXT NOT NULL,
@@ -149,7 +209,9 @@ class SQLitePersistence:
                 source TEXT NOT NULL,
                 retrieved_at_utc TEXT NOT NULL,
                 PRIMARY KEY (instrument, timestamp_utc, source)
-            );
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS market_quotes (
                 instrument TEXT NOT NULL,
                 timestamp_utc TEXT NOT NULL,
@@ -160,7 +222,9 @@ class SQLitePersistence:
                 source TEXT NOT NULL,
                 retrieved_at_utc TEXT NOT NULL,
                 PRIMARY KEY (instrument, timestamp_utc, source)
-            );
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS data_quality_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 instrument TEXT NOT NULL,
@@ -169,7 +233,9 @@ class SQLitePersistence:
                 status TEXT NOT NULL,
                 reasons_json TEXT NOT NULL,
                 source TEXT
-            );
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS provider_health_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT NOT NULL,
@@ -177,17 +243,27 @@ class SQLitePersistence:
                 status TEXT NOT NULL,
                 detail TEXT NOT NULL,
                 terminal_version TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_market_ticks_instrument
-                ON market_ticks(instrument);
-            CREATE INDEX IF NOT EXISTS idx_market_quotes_instrument
-                ON market_quotes(instrument);
-            CREATE INDEX IF NOT EXISTS idx_quality_events_instrument
-                ON data_quality_events(instrument, timeframe);
-            CREATE INDEX IF NOT EXISTS idx_health_events_source
-                ON provider_health_events(source);
+            )
+            """,
             """
+            CREATE INDEX IF NOT EXISTS idx_market_ticks_instrument
+                ON market_ticks(instrument)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_market_quotes_instrument
+                ON market_quotes(instrument)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_quality_events_instrument
+                ON data_quality_events(instrument, timeframe)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_health_events_source
+                ON provider_health_events(source)
+            """,
         )
+        for statement in statements:
+            connection.execute(statement)
 
     def save_market_bars(self, bars: tuple[MarketBar, ...]) -> None:
         """Append bars; duplicate source observations raise an integrity error."""
