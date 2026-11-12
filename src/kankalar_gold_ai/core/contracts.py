@@ -59,13 +59,110 @@ class MarketBar:
     close: float
     volume: float | None
     source: str
+    tick_volume: int | None = None
+    real_volume: int | None = None
+    spread_points: int | None = None
+    retrieved_at_utc: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "timestamp_utc", as_utc(self.timestamp_utc))
+        if self.retrieved_at_utc is not None:
+            object.__setattr__(self, "retrieved_at_utc", as_utc(self.retrieved_at_utc))
         if self.low > min(self.open, self.close) or self.high < max(self.open, self.close):
             raise ValueError("bar OHLC values are inconsistent")
         if self.low > self.high:
             raise ValueError("bar low must not exceed high")
+
+
+class DataStatus(StrEnum):
+    VALID = "VALID"
+    STALE = "STALE"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    UNAVAILABLE = "UNAVAILABLE"
+    ERROR = "ERROR"
+
+
+@dataclass(frozen=True, slots=True)
+class MarketQuote:
+    instrument: str
+    timestamp_utc: datetime
+    bid: float
+    ask: float
+    last: float | None
+    timestamp_milliseconds: int | None
+    source: str
+    retrieved_at_utc: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timestamp_utc", as_utc(self.timestamp_utc))
+        object.__setattr__(self, "retrieved_at_utc", as_utc(self.retrieved_at_utc))
+
+    @property
+    def spread(self) -> float:
+        return self.ask - self.bid
+
+
+@dataclass(frozen=True, slots=True)
+class MarketTick:
+    instrument: str
+    timestamp_utc: datetime
+    timestamp_milliseconds: int | None
+    bid: float | None
+    ask: float | None
+    last: float | None
+    volume: float | None
+    flags: int | None
+    source: str
+    retrieved_at_utc: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timestamp_utc", as_utc(self.timestamp_utc))
+        object.__setattr__(self, "retrieved_at_utc", as_utc(self.retrieved_at_utc))
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentSpecification:
+    symbol: str
+    source: str
+    retrieved_at_utc: datetime
+    digits: int | None = None
+    point: float | None = None
+    contract_size: float | None = None
+    tick_size: float | None = None
+    tick_value: float | None = None
+    volume_min: float | None = None
+    volume_max: float | None = None
+    volume_step: float | None = None
+    trade_mode: int | None = None
+    stops_level: int | None = None
+    freeze_level: int | None = None
+    currency_profit: str | None = None
+    currency_margin: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "retrieved_at_utc", as_utc(self.retrieved_at_utc))
+
+
+@dataclass(frozen=True, slots=True)
+class MarketDataHealth:
+    status: DataStatus
+    source: str
+    checked_at_utc: datetime
+    detail: str
+    terminal_version: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "checked_at_utc", as_utc(self.checked_at_utc))
+
+
+@dataclass(frozen=True, slots=True)
+class DataQualityReport:
+    status: DataStatus
+    checked_at_utc: datetime
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "checked_at_utc", as_utc(self.checked_at_utc))
 
 
 @dataclass(frozen=True, slots=True)

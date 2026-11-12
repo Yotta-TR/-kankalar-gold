@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mt5 = [
+  "MetaTrader5>=5.0.6231,<6; sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
 dev = [
   "mypy>=1.10,<2",
   "pytest>=8.2,<9",

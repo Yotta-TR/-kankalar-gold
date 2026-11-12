@@ -16,6 +16,13 @@ READ_ONLY_MT5_APIS = frozenset(
         "copy_rates_range",
         "copy_ticks_range",
         "last_error",
+        "TIMEFRAME_M1",
+        "TIMEFRAME_M5",
+        "TIMEFRAME_M15",
+        "TIMEFRAME_H1",
+        "TIMEFRAME_H4",
+        "TIMEFRAME_D1",
+        "COPY_TICKS_ALL",
     }
 )
 
