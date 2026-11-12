@@ -65,8 +65,25 @@ def test_bar_quality_flags_duplicates_reordering_incomplete_and_nan() -> None:
 def test_gaps_are_not_assumed_open_without_a_session_calendar() -> None:
     bars = (SYNTHETIC_BARS[0], SYNTHETIC_BARS[2])
     assert validate_bars(bars, "M5", NOW).reasons == ("GAP_SESSION_UNKNOWN",)
-    assert validate_bars(bars, "M5", NOW, expected_open=lambda _: True).reasons == ("MISSING_BAR",)
-    assert validate_bars(bars, "M5", NOW, expected_open=lambda _: False).status == DataStatus.VALID
+
+    def weekday_day_session(timestamp: datetime) -> bool:
+        return timestamp.weekday() < 5 and 9 <= timestamp.hour < 17
+
+    monday_now = datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc)
+    open_session_bars = tuple(
+        replace(
+            bar,
+            timestamp_utc=datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc)
+            + index * 2 * timedelta(minutes=5),
+        )
+        for index, bar in enumerate((SYNTHETIC_BARS[0], SYNTHETIC_BARS[1]))
+    )
+    assert validate_bars(
+        open_session_bars, "M5", monday_now, expected_open=weekday_day_session
+    ).reasons == ("MISSING_BAR",)
+    assert (
+        validate_bars(bars, "M5", NOW, expected_open=weekday_day_session).status == DataStatus.VALID
+    )
 
 
 def test_quote_rejects_naive_timestamp() -> None:

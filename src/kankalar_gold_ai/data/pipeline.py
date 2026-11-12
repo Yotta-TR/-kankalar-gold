@@ -10,15 +10,9 @@ from kankalar_gold_ai.core.contracts import (
     MarketDataProvider,
     as_utc,
 )
+from kankalar_gold_ai.data.errors import HistoricalDataQualityError
 from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS, validate_bars
-
-
-class HistoricalDataQualityError(ValueError):
-    """Raised when historical bars fail validation, preserving the quality report."""
-
-    def __init__(self, report: DataQualityReport) -> None:
-        self.report = report
-        super().__init__(f"Bar quality check failed: {report.status} - {', '.join(report.reasons)}")
+from kankalar_gold_ai.data.validated import ValidatedBarSet
 
 
 class HistoricalDataPipeline:
@@ -63,31 +57,48 @@ class HistoricalDataPipeline:
         Raises:
             ValueError: if arguments are invalid or retrieved bars fail validation
         """
+        bars, now = self._retrieve_bars(instrument, timeframe, end_utc, history_days)
+        report = validate_bars(bars, timeframe, now, expected_open=expected_open)
+        self._require_valid(report)
+        return bars
+
+    def retrieve_validated_bars(
+        self,
+        instrument: str,
+        timeframe: str,
+        end_utc: datetime,
+        history_days: int,
+        expected_open: Callable[[datetime], bool] | None = None,
+    ) -> ValidatedBarSet:
+        """Retrieve bars through the existing provider path and return a validated carrier."""
+        bars, now = self._retrieve_bars(instrument, timeframe, end_utc, history_days)
+        return ValidatedBarSet.from_bars(
+            bars,
+            timeframe,
+            now,
+            expected_open=expected_open,
+            expected_instrument=instrument,
+        )
+
+    def _retrieve_bars(
+        self,
+        instrument: str,
+        timeframe: str,
+        end_utc: datetime,
+        history_days: int,
+    ) -> tuple[tuple[MarketBar, ...], datetime]:
         if timeframe not in self.SUPPORTED_TIMEFRAMES:
             raise ValueError(f"unsupported timeframe: {timeframe}")
         if history_days < 1 or history_days > self.MAX_HISTORY_DAYS:
             raise ValueError(
                 f"history_days must be between 1 and {self.MAX_HISTORY_DAYS}, got {history_days}"
             )
-
         end = as_utc(end_utc)
         now = self._now()
-
         if end > now:
             raise ValueError(f"end_utc ({end}) must not be in the future (now={now})")
-
-        # Calculate the start of the range
         start = end - timedelta(days=history_days)
-
-        # Retrieve bars from the provider
-        bars = self._provider.get_bars(instrument, timeframe, start, end)
-
-        # Validate quality
-        report = validate_bars(bars, timeframe, now, expected_open=expected_open)
-
-        self._require_valid(report)
-
-        return bars
+        return self._provider.get_bars(instrument, timeframe, start, end), now
 
     def latest_complete_bar(
         self,

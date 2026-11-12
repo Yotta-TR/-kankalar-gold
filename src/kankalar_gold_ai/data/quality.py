@@ -2,6 +2,7 @@
 
 import math
 from datetime import datetime, timedelta
+from numbers import Real
 from typing import Callable
 
 from kankalar_gold_ai.core.contracts import (
@@ -20,6 +21,16 @@ TIMEFRAME_DURATIONS = {
     "H4": timedelta(hours=4),
     "D1": timedelta(days=1),
 }
+
+
+def _finite_real(value: object, *, positive: bool = False) -> bool:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False
+    try:
+        numeric = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return math.isfinite(numeric) and (numeric > 0 if positive else numeric >= 0)
 
 
 def validate_quote(
@@ -56,7 +67,7 @@ def validate_bars(
 ) -> DataQualityReport:
     """Only classify gaps as missing when a caller supplies a session calendar."""
     now = as_utc(now)
-    if timeframe not in TIMEFRAME_DURATIONS:
+    if not isinstance(timeframe, str) or timeframe not in TIMEFRAME_DURATIONS:
         raise ValueError(f"unsupported timeframe: {timeframe}")
     if not bars:
         return DataQualityReport(DataStatus.INSUFFICIENT_DATA, now, ("EMPTY_HISTORY",))
@@ -64,8 +75,14 @@ def validate_bars(
     reasons: set[str] = set()
     seen: set[datetime] = set()
     previous: datetime | None = None
+    instrument = bars[0].instrument
+    source = bars[0].source
     for bar in bars:
         timestamp = bar.timestamp_utc
+        if bar.instrument != instrument:
+            reasons.add("INSTRUMENT_MISMATCH")
+        if bar.source != source:
+            reasons.add("SOURCE_MISMATCH")
         if bar.timeframe != timeframe:
             reasons.add("TIMEFRAME_MISMATCH")
         if timestamp in seen:
@@ -88,19 +105,36 @@ def validate_bars(
         previous = timestamp
         if timestamp + duration > now:
             reasons.add("INCOMPLETE_BAR")
-        if any(
-            not math.isfinite(value) or value <= 0
-            for value in (bar.open, bar.high, bar.low, bar.close)
-        ):
+        prices = (bar.open, bar.high, bar.low, bar.close)
+        if not all(_finite_real(value, positive=True) for value in prices):
             reasons.add("INVALID_PRICE")
-        elif not (bar.low <= min(bar.open, bar.close) <= max(bar.open, bar.close) <= bar.high):
-            reasons.add("INVALID_OHLC")
+        else:
+            open_price, high, low, close = (float(value) for value in prices)
+            if not (low <= min(open_price, close) <= max(open_price, close) <= high):
+                reasons.add("INVALID_OHLC")
+        if bar.volume is not None and not _finite_real(bar.volume):
+            reasons.add("INVALID_VOLUME")
+        for field, value in (
+            ("tick_volume", bar.tick_volume),
+            ("real_volume", bar.real_volume),
+            ("spread_points", bar.spread_points),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                reasons.add(f"INVALID_{field.upper()}")
     errors = {
         "DUPLICATE_BAR",
         "OUT_OF_ORDER",
         "INVALID_PRICE",
         "INVALID_OHLC",
         "TIMEFRAME_MISMATCH",
+        "INSTRUMENT_MISMATCH",
+        "SOURCE_MISMATCH",
+        "INVALID_VOLUME",
+        "INVALID_TICK_VOLUME",
+        "INVALID_REAL_VOLUME",
+        "INVALID_SPREAD_POINTS",
     }
     if reasons & errors:
         return DataQualityReport(DataStatus.ERROR, now, tuple(sorted(reasons)))
