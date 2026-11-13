@@ -84,3 +84,37 @@
   caller-asserted because `DataQualityReport` has no identity fields. Append-only
   storage has no unique constraint, so concurrent identical cache misses may
   create duplicate rows; this is accepted and readers use the newest row.
+
+## ADR-008: F4 no-lookahead test harness and recorded pipeline boundary
+
+- **Decision:** F4 is delivered as test-only code (`tests/fixtures/point_in_time.py`,
+  `faulty_studies.py`, `adversarial_provider.py` and two test modules). No `src/`,
+  schema or cache-format change.
+- **Method:** a result is a function of study version, configuration, cutoff and the
+  selected snapshot. For the same cutoff and snapshot the full `StudyResult` must be
+  exactly equal across repeats, fresh instances, evaluation orders and future-only
+  mutations (append, or altering OHLCV/volume of bars ending after the cutoff).
+  Moving the cutoff inside one bar may change only `as_of_utc` and cache identity;
+  moving it past a newly completed bar legitimately changes snapshot and output.
+  Every run uses a store that never hits the cache so a cached result cannot mask a
+  leak. Comparison is exact; a numeric tolerance is deferred until a real study needs it.
+- **Controls:** a causal canary (mean of the last three closes) plus deliberately
+  faulty studies: a future-peeker (the only fixture given the full universe), a
+  stateful repainter, and scripted clock/random consumers. A constant study only proves
+  the harness's non-vacuity guards; constant output is not rejected for real studies.
+  Sensitivity is checked only against a mutation the test author declares sensitive.
+- **Guarantees and limits:** the harness detects side-channel, stateful and
+  order-dependent leaks and selection errors visible in the full `StudyResult`. It
+  cannot see leaks through channels it does not perturb (files, sockets, environment,
+  unscripted clock/RNG, a held provider), which remain for the AST safety scan and review.
+- **Reference selector:** `select_completed_bars` is a test oracle, not a production
+  safeguard.
+- **Recorded boundary gap (tests B1-B6):** `HistoricalDataPipeline` forwards `end_utc`
+  to the provider (which bounds bar open time) and neither filters nor validates the
+  returned bars against it; `ValidatedBarSet` checks completeness only against
+  `validated_at_utc`. `StudyRunner` rejects bars ending after the supplied `as_of_utc`
+  before `compute`. Nothing binds the pipeline `end_utc` to the runner `as_of_utc`; B4
+  characterizes this gap and is not desired behavior.
+- **Deferred:** a production change (for example validating provider output against the
+  request range, or binding `end_utc` and `as_of_utc`) needs its own review because it
+  changes `end_utc` semantics shared by the Mock and MT5 providers.

@@ -57,12 +57,12 @@ Checked against the repository (not assumed):
 
 | Area | Verified fact |
 |---|---|
-| `StudyResult` (`core/contracts.py`) | Frozen dataclass with fields `study_id`, `version`, `instrument`, `timeframe`, `as_of_utc` (normalized to UTC), `status`, `state`, `value`, `normalized_value`, `direction`, `uncertainty`, `inputs`, `evidence`, `limitations`, `data_snapshot_id`. |
+| `StudyResult` (`core/contracts.py`) | Frozen dataclass with fields `study_id`, `version`, `instrument`, `timeframe`, `as_of_utc` (normalized to UTC), `status`, `state`, `value`, `normalized_value`, `direction`, `uncertainty`, `inputs`, `evidence`, `limitations`, `data_snapshot_id`, `provenance` (structured, defaulted; added in Phase 1B.3). |
 | `StudyStatus` | `AVAILABLE`, `INSUFFICIENT_DATA`, `UNAVAILABLE`, `STALE`, `ERROR`. |
 | `Direction` | `BULLISH`, `BEARISH`, `NEUTRAL`, `NOT_APPLICABLE`. |
 | Nullable fields | `state`, `value`, `normalized_value`, `uncertainty`, `data_snapshot_id` are `None`-able, so "missing" is distinct from `0.0`. |
 | `inputs` typing | Flat `dict[str, str \| int \| float \| bool \| None]`; nested structures are not representable. |
-| Not in the contract | No dedicated fields for source, retrieval timestamp, code version (only `version`), posterior probabilities, or input window; these must travel via `inputs`, `evidence`, or `data_snapshot_id` **[TBD]**. Changing the contract is out of scope here. |
+| Not in the contract | No dedicated fields for retrieval timestamp, code/Git revision (only the study `version`), or posterior probabilities. Source and input window are carried in the structured `provenance` field; the rest must travel via `inputs` or `evidence` **[TBD]**. Changing the contract is out of scope here. |
 | `DataStatus` (`core/contracts.py`) | `VALID`, `STALE`, `INSUFFICIENT_DATA`, `UNAVAILABLE`, `ERROR`. This is the *data* status, distinct from `StudyStatus` (no `VALID` there; `AVAILABLE` instead). |
 | Bars/ticks/quotes | `MarketBar` carries instrument, timeframe, UTC timestamp, OHLC, `volume`, `tick_volume`, `real_volume`, `spread_points`, `source`, `retrieved_at_utc`. `MarketTick` and `MarketQuote` carry bid/ask/last, `source`, `retrieved_at_utc`. |
 | Timeframes | `HistoricalDataPipeline` supports `M1, M5, M15, H1, H4, D1`; retrieval is bounded to 366 days. |
@@ -106,8 +106,9 @@ quality failure blocks signal creation or downgrades the system to `DEGRADED`
 [SPEC §4.6]; no symbol, source or timeframe is silently substituted
 [SPEC §4.6].
 
-Mapping of upstream `DataStatus` to `StudyStatus` **[SUGGESTION]** (the spec
-requires the statuses to stay distinct but does not define this table):
+Mapping of upstream `DataStatus` to `StudyStatus`, implemented for caller-supplied
+`DataFailure` objects in `StudyRunner.run_data_failure` (the spec requires the
+statuses to stay distinct but does not define this table):
 
 | Upstream `DataStatus` | Study outcome |
 |---|---|
@@ -152,8 +153,9 @@ no-lookahead checks, plus documentation and a version for each study
    does not yet exist **[TBD]**. Additionally, a persistence-write test:
    `save_study_result` stores the row and the stored fields and JSON columns
    (`inputs_json`, `evidence_json`, `limitations_json`) are verified by direct
-   inspection of the database. A read API and a complete object round-trip
-   test are **[TBD]** (no read method exists today).
+   inspection of the database. A strict, cache-oriented read with
+   deserialization (`find_cached_study_result`) exists; a general result-query
+   API does not **[TBD]**.
 4. Study-specific cases listed in each entry. Expected numeric values are
    **[TBD]** until a formula is approved.
 
@@ -192,11 +194,11 @@ Dependencies are separated into three tiers.
 
 | ID | Item | Status today |
 |---|---|---|
-| F1 | Study Execution Engine (run studies on validated, closed-bar data; emit `StudyResult`) | Not built **[TBD design]** |
-| F2 | Reproducible data-snapshot identity and provenance | Field exists; generator missing |
-| F3 | Configuration/version handling (study config and version registry) | Not built |
-| F4 | No-lookahead safeguards (test harness) | Not built |
-| F5 | Mapping from `DataStatus` to `StudyStatus` (§4.3) | Suggestion only |
+| F1 | Study Execution Engine (run studies on validated, closed-bar data; emit `StudyResult`) | Implemented as a single-timeframe `StudyRunner` (ADR-007); no multi-timeframe orchestration, scheduling or actual studies |
+| F2 | Reproducible data-snapshot identity and provenance | Implemented: `compute_bar_snapshot_id` and structured `StudyResult.provenance`; Git/application revision tracking deferred |
+| F3 | Configuration/version handling (study config and version registry) | Implemented: `StudyRegistry`, scalar config validation, explicit study versions |
+| F4 | No-lookahead safeguards (test harness) | Runtime cutoff protections exist (`as_of_utc` checks, closed-bar `ValidatedBarSet`). A reusable test-only point-in-time harness is added in `tests/` (ADR-008). Not enforced in production: the pipeline `end_utc` is not bound to the runner `as_of_utc` |
+| F5 | Mapping from `DataStatus` to `StudyStatus` (§4.3) | Implemented for a caller-supplied `DataFailure` (`run_data_failure`). Not integrated: the pipeline does not produce a `DataFailure` and `HistoricalDataQualityError` is not converted into a result automatically |
 
 **B. Conditional dependencies** (only for studies that need them):
 
@@ -433,10 +435,10 @@ FOUNDATION → BASELINE → STRUCTURE → DATA_DEPENDENT → ADVANCED.
 
 ## 13. Unresolved research/design decisions
 
-1. Study Execution Engine design, study registry and configuration versioning (F1, F3).
-2. Data-snapshot ID generation and provenance fields beyond the current `StudyResult` (F2).
+1. Partly resolved (ADR-007): single-timeframe engine, registry and configuration versioning exist (F1, F3). Open: multi-timeframe orchestration and scheduling.
+2. Partly resolved (ADR-007): snapshot ID generation and structured provenance exist (F2). Open: Git/application revision tracking.
 3. Session/market calendar and the policy for staleness during closures (C1, for session-dependent studies).
-4. Mapping `DataStatus` → `StudyStatus` (§4.3, F5).
+4. Partly resolved (ADR-007): `DataStatus` → `StudyStatus` mapping exists for caller-supplied `DataFailure`. Open: automatic pipeline-to-runner failure wiring, and whether to bind the pipeline `end_utc` to the runner `as_of_utc` (ADR-008).
 5. Warm-up lengths, parameters, and formulas for every study (none are approved; spec examples are illustrative).
 6. Direction semantics for each trend/structure study.
 7. Operational definitions and non-repainting rules for swings, BOS/CHoCH, zones, ranges, sessions, FVG, liquidity sweeps, and each candlestick pattern.
@@ -448,6 +450,6 @@ FOUNDATION → BASELINE → STRUCTURE → DATA_DEPENDENT → ADVANCED.
 13. Evaluation targets and metrics for each study (see [SPEC §8.2, §11]).
 14. Correlation grouping method for correlated studies (D1).
 15. Representation of non-bar macro/event/weekly study frequency in the required `StudyResult.timeframe` field. No sentinel value or new enum value is proposed here.
-16. Study-result read/deserialization API and a complete object round-trip test (no read method exists in `storage/sqlite.py` today).
+16. General (non-cache) study-result query API. The strict cache-oriented read `find_cached_study_result` already exists.
 17. Validated-input paths for quotes/ticks (fail-closed ingestion) and for external macro, positioning, futures, volume and order-book data.
 18. Exact broker gold symbol, to be discovered and validated through MT5.

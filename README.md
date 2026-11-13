@@ -73,7 +73,7 @@ before adding any broker or messaging integration.
 
 ## Next phase
 
-Phase 1B.3 adds a single-timeframe `StudyRunner` with an append-only, snapshot-keyed result cache (SQLite schema v3); no actual studies, strategies or Runner scheduling exist yet.
+Phase 1B.3 (single-timeframe `StudyRunner`, append-only snapshot-keyed result cache, SQLite schema v3) is implemented; the F4 no-lookahead test harness (ADR-008) adds test-only coverage. Next: decide whether to bind the pipeline `end_utc` to the runner `as_of_utc`, then Phase 2 studies. No actual studies, strategies or Runner scheduling exist yet.
 The adapter has only been tested with fakes, not against a real terminal. The
 official MT5 `initialize()` may launch the terminal and use its last saved
 account; do not call it until a separate read-only environment and terminal
