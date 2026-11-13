@@ -5,11 +5,12 @@ import pickle
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 from fractions import Fraction
+from types import MappingProxyType
 
 import pytest
 
 from kankalar_gold_ai.core.contracts import Direction, MarketBar, StudyStatus
-from kankalar_gold_ai.studies.base import ConfigValue, StudyOutput
+from kankalar_gold_ai.studies.base import ConfigValue, StudyOutput, validate_config_values
 from kankalar_gold_ai.studies.errors import (
     DuplicateStudyError,
     InvalidStudyError,
@@ -477,6 +478,292 @@ def test_valid_configuration_is_copied_and_normalized_to_read_only_mapping() -> 
     assert type(normalized["enabled"]) is bool
 
 
+class HostileConfigString(str):
+    def __str__(self) -> str:
+        raise AssertionError("string conversion called")
+
+
+class HostileConfigInt(int):
+    def __lt__(self, other: object) -> bool:
+        raise AssertionError("comparison called")
+
+    def __int__(self) -> int:
+        raise AssertionError("integer conversion called")
+
+
+class HostileConfigFloat(float):
+    def __float__(self) -> float:
+        raise AssertionError("float conversion called")
+
+
+class SpoofingMeta(type):
+    equality_calls = 0
+
+    def __eq__(cls, other: object) -> bool:
+        SpoofingMeta.equality_calls += 1
+        return True
+
+    def __getattribute__(cls, name: str) -> object:
+        if name == "__name__":
+            raise AssertionError("type name accessed")
+        return super().__getattribute__(name)
+
+
+class SpoofedScalar(metaclass=SpoofingMeta):
+    def __init__(self) -> None:
+        self.payload: list[object] = []
+
+    @property
+    def __class__(self) -> type:
+        raise AssertionError("spoofed class accessed")
+
+    def __repr__(self) -> str:
+        raise AssertionError("representation called")
+
+    def __float__(self) -> float:
+        raise AssertionError("float conversion called")
+
+    def __index__(self) -> int:
+        raise AssertionError("index conversion called")
+
+
+class SpoofedStringScalar(SpoofedScalar):
+    @property
+    def __class__(self) -> type:
+        return str
+
+
+class SpoofedNumericScalar(SpoofedScalar):
+    @property
+    def __class__(self) -> type:
+        return float
+
+
+class HostileKey(str):
+    def __hash__(self) -> int:
+        raise AssertionError("hash called")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("equality called")
+
+    def __repr__(self) -> str:
+        raise AssertionError("representation called")
+
+
+class SingleItemMapping(Mapping[object, object]):
+    def __init__(self, key: object, value: object) -> None:
+        self.key = key
+        self.value = value
+
+    def __getitem__(self, key: object) -> object:
+        raise AssertionError("lookup called")
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter((self.key,))
+
+    def __len__(self) -> int:
+        return 1
+
+    def items(self):  # type: ignore[no-untyped-def]
+        return iter(((self.key, self.value),))
+
+
+def test_hostile_config_key_is_rejected_without_using_its_methods() -> None:
+    for key in ("", MutableHashString("key"), HostileKey("key"), SpoofedStringScalar()):
+        with pytest.raises(StudyConfigError, match="keys"):
+            validate_config_values(SingleItemMapping(key, 1))  # type: ignore[arg-type]
+
+
+def test_spoofed_config_values_are_rejected_without_using_untrusted_methods() -> None:
+    SpoofingMeta.equality_calls = 0
+    for value in (SpoofedScalar(), SpoofedStringScalar(), SpoofedNumericScalar()):
+        with pytest.raises(StudyConfigError, match="'value'"):
+            validate_config_values({"value": value})
+    assert SpoofingMeta.equality_calls == 0
+
+
+def test_spoofed_config_values_never_reach_registered_study_methods() -> None:
+    class CountingStudy(FakeStudy):
+        def min_bars(self, config: Mapping[str, ConfigValue]) -> int:
+            raise AssertionError("min_bars called")
+
+        def compute(
+            self, bars: tuple[MarketBar, ...], config: Mapping[str, ConfigValue]
+        ) -> StudyOutput:
+            raise AssertionError("compute called")
+
+    SpoofingMeta.equality_calls = 0
+    study = CountingStudy()
+    registered = StudyRegistry().register(study)
+    for value in (SpoofedScalar(), SpoofedStringScalar(), SpoofedNumericScalar()):
+        config = {"value": value}
+        with pytest.raises(StudyConfigError, match="'value'"):
+            registered.validate_config(config)
+        with pytest.raises(StudyConfigError, match="'value'"):
+            registered.min_bars(config)
+        with pytest.raises(StudyConfigError, match="'value'"):
+            registered.compute((), config)
+    assert study.config_calls == 0
+    assert SpoofingMeta.equality_calls == 0
+
+
+def test_spoofed_normalized_config_value_is_rejected() -> None:
+    class NormalizingStudy(FakeStudy):
+        def validate_config(self, raw: Mapping[str, ConfigValue]) -> Mapping[str, ConfigValue]:
+            return {"value": SpoofedStringScalar()}  # type: ignore[dict-item]
+
+    SpoofingMeta.equality_calls = 0
+    with pytest.raises(StudyConfigError, match="'value'"):
+        StudyRegistry().register(NormalizingStudy()).validate_config({})
+    assert SpoofingMeta.equality_calls == 0
+
+
+@pytest.mark.parametrize("value", ([], (), {}, object()))
+def test_config_rejects_unsupported_containers_and_objects(value: object) -> None:
+    with pytest.raises(StudyConfigError, match="'value'"):
+        validate_config_values({"value": value})
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    (
+        ({MutableHashString("key"): "value"}, "keys"),
+        ({"value": HostileConfigString("value")}, "'value'"),
+        ({"value": HostileConfigInt(0)}, "'value'"),
+        ({"value": HostileConfigFloat(1.0)}, "'value'"),
+        ({"value": float("nan")}, "finite"),
+        ({"value": float("inf")}, "finite"),
+        ({"value": float("-inf")}, "finite"),
+    ),
+)
+def test_invalid_config_rejected_before_any_study_method(
+    config: dict[str, object], message: str
+) -> None:
+    class CountingStudy(FakeStudy):
+        def min_bars(self, config: Mapping[str, ConfigValue]) -> int:
+            raise AssertionError("min_bars called")
+
+        def compute(
+            self, bars: tuple[MarketBar, ...], config: Mapping[str, ConfigValue]
+        ) -> StudyOutput:
+            raise AssertionError("compute called")
+
+    study = CountingStudy()
+    registered = StudyRegistry().register(study)
+    with pytest.raises(StudyConfigError, match=message):
+        validate_config_values(config)
+    with pytest.raises(StudyConfigError, match=message):
+        registered.validate_config(config)
+    with pytest.raises(StudyConfigError, match=message):
+        registered.min_bars(config)
+    with pytest.raises(StudyConfigError, match=message):
+        registered.compute((), config)
+    assert study.config_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("normalized", "message"),
+    (
+        ({MutableHashString("key"): 1}, "keys"),
+        ({"value": HostileConfigString("value")}, "'value'"),
+        ({"value": HostileConfigInt(0)}, "'value'"),
+        ({"value": HostileConfigFloat(1.0)}, "'value'"),
+        ({"value": float("nan")}, "finite"),
+        ({"value": float("inf")}, "finite"),
+        ({"value": float("-inf")}, "finite"),
+    ),
+)
+def test_invalid_study_normalized_configuration_is_rejected(
+    normalized: dict[str, ConfigValue], message: str
+) -> None:
+    class NormalizingStudy(FakeStudy):
+        def validate_config(self, raw: Mapping[str, ConfigValue]) -> Mapping[str, ConfigValue]:
+            return normalized
+
+    registered = StudyRegistry().register(NormalizingStudy())
+    with pytest.raises(StudyConfigError, match=message):
+        registered.validate_config({})
+
+
+def test_builtin_config_values_and_read_only_mappings_are_copied() -> None:
+    raw: dict[str, ConfigValue] = {
+        "text": "value",
+        "integer": 3,
+        "float": 1.5,
+        "enabled": True,
+        "disabled": False,
+        "optional": None,
+    }
+    read_only = MappingProxyType(raw)
+    copied = validate_config_values(read_only)
+    registered = StudyRegistry().register(FakeStudy())
+    normalized = registered.validate_config(read_only)
+    raw["integer"] = 4
+    expected = {
+        "text": "value",
+        "integer": 3,
+        "float": 1.5,
+        "enabled": True,
+        "disabled": False,
+        "optional": None,
+    }
+    assert copied == normalized == expected
+    assert type(normalized["enabled"]) is bool
+    assert type(normalized["disabled"]) is bool
+    with pytest.raises(TypeError):
+        normalized["integer"] = 5  # type: ignore[index]
+
+
+def test_study_normalized_configuration_is_copied() -> None:
+    returned: dict[str, ConfigValue] = {"limit": 1}
+
+    class NormalizingStudy(FakeStudy):
+        def validate_config(self, raw: Mapping[str, ConfigValue]) -> Mapping[str, ConfigValue]:
+            return returned
+
+    normalized = StudyRegistry().register(NormalizingStudy()).validate_config({})
+    returned["limit"] = 2
+    assert normalized["limit"] == 1
+    with pytest.raises(TypeError):
+        normalized["limit"] = 3  # type: ignore[index]
+
+
+def test_study_methods_receive_independent_read_only_configurations() -> None:
+    class CapturingStudy(FakeStudy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.received: list[Mapping[str, ConfigValue]] = []
+
+        def validate_config(self, raw: Mapping[str, ConfigValue]) -> Mapping[str, ConfigValue]:
+            self.received.append(raw)
+            return raw
+
+        def min_bars(self, config: Mapping[str, ConfigValue]) -> int:
+            self.received.append(config)
+            return 1
+
+        def compute(
+            self, bars: tuple[MarketBar, ...], config: Mapping[str, ConfigValue]
+        ) -> StudyOutput:
+            self.received.append(config)
+            return StudyOutput(StudyStatus.AVAILABLE)
+
+    study = CapturingStudy()
+    registered = StudyRegistry().register(study)
+    raw: dict[str, ConfigValue] = {"value": 1}
+    normalized = registered.validate_config(MappingProxyType(raw))
+    assert registered.min_bars(raw) == 1
+    registered.compute((), raw)
+    raw["value"] = 2
+    assert normalized["value"] == 1
+    assert len(study.received) == 3
+    for config in study.received:
+        assert type(config) is MappingProxyType
+        assert config["value"] == 1
+        with pytest.raises(TypeError):
+            config["value"] = 3  # type: ignore[index]
+
+
 @pytest.mark.parametrize("min_bars", (True, 0, -1, 1.5, "2", None))
 def test_invalid_min_bars_results_raise_typed_error(min_bars: object) -> None:
     registered = StudyRegistry().register(FakeStudy(min_bars_value=min_bars))
@@ -618,6 +905,29 @@ def test_study_output_rejects_mutable_numeric_subclasses() -> None:
     mutable_number.extra = []
     with pytest.raises(ValueError, match="finite number"):
         StudyOutput(status=StudyStatus.AVAILABLE, value=mutable_number)
+
+
+@pytest.mark.parametrize("field", ("value", "normalized_value", "uncertainty"))
+def test_study_output_rejects_spoofed_numbers_without_custom_methods(field: str) -> None:
+    SpoofingMeta.equality_calls = 0
+    for value in (SpoofedScalar(), SpoofedNumericScalar()):
+        with pytest.raises(ValueError, match=field):
+            StudyOutput(StudyStatus.AVAILABLE, **{field: value})
+    assert SpoofingMeta.equality_calls == 0
+
+
+def test_study_output_rejects_all_numeric_subclasses_and_overflow() -> None:
+    class FractionSubclass(Fraction):
+        def __float__(self) -> float:
+            raise AssertionError("conversion called")
+
+    for value in (HostileConfigInt(1), HostileConfigFloat(1), FractionSubclass(1, 2)):
+        with pytest.raises(ValueError, match="finite number"):
+            StudyOutput(StudyStatus.AVAILABLE, value=value)
+    for value in (10**1000, Fraction(10**1000, 1)):
+        with pytest.raises(ValueError, match="finite number") as exc:
+            StudyOutput(StudyStatus.AVAILABLE, value=value)
+        assert isinstance(exc.value.__cause__, OverflowError)
 
 
 def test_study_output_rejects_subclass_shadowing_status() -> None:

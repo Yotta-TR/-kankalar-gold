@@ -46,25 +46,23 @@ def validate_config_values(values: Mapping[str, object]) -> dict[str, ConfigValu
 
     copied: dict[str, ConfigValue] = {}
     for key, value in values.items():
-        if not isinstance(key, str) or not key:
-            raise StudyConfigError("configuration keys must be non-empty strings")
-        if value is None or isinstance(value, (str, bool, int)):
+        if type(key) is not str or not key:
+            raise StudyConfigError("configuration keys must be non-empty built-in strings")
+        if value is None or type(value) is str or type(value) is bool or type(value) is int:
             copied[key] = value
-        elif isinstance(value, float):
+        elif type(value) is float:
             if not math.isfinite(value):
                 raise StudyConfigError(f"configuration value {key!r} must be finite")
             copied[key] = value
         else:
-            raise StudyConfigError(
-                f"configuration value {key!r} must be a flat scalar, got {type(value).__name__}"
-            )
+            raise StudyConfigError(f"configuration value {key!r} must be a built-in flat scalar")
     return copied
 
 
 def _validated_output_number(name: str, value: object) -> float | None:
     if value is None:
         return None
-    if type(value) not in (int, float, Fraction) or not isinstance(value, (int, float, Fraction)):
+    if type(value) is not int and type(value) is not float and type(value) is not Fraction:
         raise ValueError(f"{name} must be a finite number or None")
     try:
         number = float(value)
