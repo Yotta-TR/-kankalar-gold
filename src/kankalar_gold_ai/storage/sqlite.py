@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterator
 
 from kankalar_gold_ai.core.contracts import (
+    Direction,
     InstrumentSpecification,
     MarketBar,
     MarketDataHealth,
@@ -15,6 +16,16 @@ from kankalar_gold_ai.core.contracts import (
     MarketTick,
     SignalLifecycleEvent,
     StudyResult,
+    StudyStatus,
+)
+from kankalar_gold_ai.core.study_results import (
+    CACHE_FORMAT_VERSION,
+    PROV_CACHE_FORMAT,
+    StudyResultKey,
+    StudyResultValidationError,
+    parse_utc_z,
+    provenance_mapping,
+    validate_study_result,
 )
 
 
@@ -22,10 +33,25 @@ class MigrationError(RuntimeError):
     """A database migration failed."""
 
 
+class StoredStudyResultError(ValueError):
+    """A stored study result row is corrupt or violates the StudyResult contract."""
+
+
+_STUDY_RESULT_COLUMNS = (
+    "study_id, version, instrument, timeframe, as_of_utc, status, state, value, "
+    "normalized_value, direction, uncertainty, inputs_json, evidence_json, "
+    "limitations_json, data_snapshot_id, provenance_json, cache_format_version"
+)
+
+
+def _reject_constant(name: str) -> object:
+    raise ValueError(f"non-finite JSON constant: {name}")
+
+
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -88,6 +114,7 @@ class SQLitePersistence:
                 migrations = {
                     1: self._migrate_to_version_1,
                     2: self._migrate_to_version_2,
+                    3: self._migrate_to_version_3,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -167,6 +194,21 @@ class SQLitePersistence:
             """
             CREATE INDEX IF NOT EXISTS idx_signal_events_signal_id
                 ON signal_events(signal_id)
+            """,
+        )
+        for statement in statements:
+            connection.execute(statement)
+
+    def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
+        """Phase 1B.3 schema: structured provenance and an explicit cache-format column."""
+        statements = (
+            "ALTER TABLE study_results ADD COLUMN provenance_json TEXT",
+            "ALTER TABLE study_results ADD COLUMN cache_format_version TEXT",
+            """
+            CREATE INDEX IF NOT EXISTS idx_study_results_cache ON study_results (
+                study_id, version, instrument, timeframe, as_of_utc,
+                data_snapshot_id, cache_format_version
+            )
             """,
         )
         for statement in statements:
@@ -425,8 +467,9 @@ class SQLitePersistence:
                 INSERT INTO study_results (
                     study_id, version, instrument, timeframe, as_of_utc, status, state,
                     value, normalized_value, direction, uncertainty, inputs_json,
-                    evidence_json, limitations_json, data_snapshot_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    evidence_json, limitations_json, data_snapshot_id,
+                    provenance_json, cache_format_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.study_id,
@@ -444,8 +487,42 @@ class SQLitePersistence:
                     json.dumps(result.evidence),
                     json.dumps(result.limitations),
                     result.data_snapshot_id,
+                    json.dumps(dict(result.provenance), sort_keys=True),
+                    dict(result.provenance).get(PROV_CACHE_FORMAT),
                 ),
             )
+
+    def find_cached_study_result(self, key: StudyResultKey) -> StudyResult | None:
+        """Return the newest cache-eligible row for the exact key, or None.
+
+        ERROR and STALE rows and rows from older schema versions (NULL
+        cache_format_version) never match. A corrupt matching row raises
+        StoredStudyResultError instead of falling back to an older row.
+        """
+        with self._connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT {_STUDY_RESULT_COLUMNS} FROM study_results
+                WHERE study_id = ? AND version = ? AND instrument = ? AND timeframe = ?
+                  AND as_of_utc = ? AND data_snapshot_id = ? AND inputs_json = ?
+                  AND cache_format_version = ?
+                  AND status IN ('AVAILABLE', 'INSUFFICIENT_DATA', 'UNAVAILABLE')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (
+                    key.study_id,
+                    key.version,
+                    key.instrument,
+                    key.timeframe,
+                    _utc_isoformat(key.as_of_utc),
+                    key.data_snapshot_id,
+                    key.inputs_json,
+                    key.cache_format_version,
+                ),
+            ).fetchone()
+        if row is None:
+            return None
+        return _study_result_from_row(row)
 
     def save_signal_event(self, event: SignalLifecycleEvent) -> None:
         """Append one lifecycle event; duplicate event ids are rejected."""
@@ -484,3 +561,74 @@ def as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def _study_result_from_row(row: tuple[object, ...]) -> StudyResult:
+    """Strictly rebuild a StudyResult; any violation raises StoredStudyResultError."""
+    try:
+        (
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            as_of_text,
+            status,
+            state,
+            value,
+            normalized_value,
+            direction,
+            uncertainty,
+            inputs_json,
+            evidence_json,
+            limitations_json,
+            snapshot_id,
+            provenance_json,
+            cache_format,
+        ) = row
+        for text in (inputs_json, evidence_json, limitations_json, provenance_json):
+            if type(text) is not str:
+                raise StoredStudyResultError("stored JSON column is missing or not text")
+        assert isinstance(inputs_json, str)
+        assert isinstance(evidence_json, str)
+        assert isinstance(limitations_json, str)
+        assert isinstance(provenance_json, str)
+        inputs = json.loads(inputs_json, parse_constant=_reject_constant)
+        evidence = json.loads(evidence_json, parse_constant=_reject_constant)
+        limitations = json.loads(limitations_json, parse_constant=_reject_constant)
+        provenance = json.loads(provenance_json, parse_constant=_reject_constant)
+        if type(inputs) is not dict or type(provenance) is not dict:
+            raise StoredStudyResultError("stored JSON object has the wrong type")
+        if type(evidence) is not list or type(limitations) is not list:
+            raise StoredStudyResultError("stored JSON list has the wrong type")
+        provenance_pairs = tuple(sorted(provenance.items()))
+        provenance_mapping(provenance_pairs)
+        if cache_format != CACHE_FORMAT_VERSION or (
+            provenance.get(PROV_CACHE_FORMAT) != cache_format
+        ):
+            raise StoredStudyResultError("stored cache format version is inconsistent")
+        if type(status) is not str or type(direction) is not str:
+            raise StoredStudyResultError("stored enum column has the wrong type")
+        result = StudyResult(
+            study_id=study_id,  # type: ignore[arg-type]
+            version=version,  # type: ignore[arg-type]
+            instrument=instrument,  # type: ignore[arg-type]
+            timeframe=timeframe,  # type: ignore[arg-type]
+            as_of_utc=parse_utc_z(as_of_text),
+            status=StudyStatus(status),
+            state=state,  # type: ignore[arg-type]
+            value=value,  # type: ignore[arg-type]
+            normalized_value=normalized_value,  # type: ignore[arg-type]
+            direction=Direction(direction),
+            uncertainty=uncertainty,  # type: ignore[arg-type]
+            inputs=inputs,
+            evidence=tuple(evidence),
+            limitations=tuple(limitations),
+            data_snapshot_id=snapshot_id,  # type: ignore[arg-type]
+            provenance=provenance_pairs,
+        )
+        validate_study_result(result)
+    except StoredStudyResultError:
+        raise
+    except (StudyResultValidationError, ValueError, TypeError) as error:
+        raise StoredStudyResultError("stored study result row is corrupt") from error
+    return result

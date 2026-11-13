@@ -73,7 +73,7 @@ before adding any broker or messaging integration.
 
 ## Next phase
 
-Phase 1B builds automated study execution and result caching on top of Phase 1A.
+Phase 1B.3 adds a single-timeframe `StudyRunner` with an append-only, snapshot-keyed result cache (SQLite schema v3); no actual studies, strategies or Runner scheduling exist yet.
 The adapter has only been tested with fakes, not against a real terminal. The
 official MT5 `initialize()` may launch the terminal and use its last saved
 account; do not call it until a separate read-only environment and terminal

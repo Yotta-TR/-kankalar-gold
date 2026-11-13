@@ -182,6 +182,7 @@ class StudyResult:
     evidence: tuple[str, ...]
     limitations: tuple[str, ...]
     data_snapshot_id: str | None
+    provenance: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of_utc", as_utc(self.as_of_utc))

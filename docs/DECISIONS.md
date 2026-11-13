@@ -54,3 +54,33 @@
   than simple `key=value` text.
 - **Consequence:** Redaction covers common secret field names and formats; it
   cannot recognize arbitrary secret values logged under innocuous names.
+
+## ADR-007: StudyRunner, result cache and schema v3 (Phase 1B.3)
+
+- **Decision:** `StudyRunner` runs one registered study (explicit ID and version)
+  on one `ValidatedBarSet` for one timeframe, with a required UTC `as_of_utc`
+  cutoff (every bar must have ended by it; it may not exceed `validated_at_utc`).
+  Configuration is normalized by `RegisteredStudy` on both the normal and the
+  data-failure path. The snapshot ID is computed before the warm-up check, so
+  `INSUFFICIENT_DATA` results are cacheable. The cache key is study ID, study
+  version, instrument, timeframe, `as_of_utc`, canonical normalized config,
+  data snapshot ID and `CACHE_FORMAT_VERSION`. Ordinary compute exceptions and
+  invalid outputs become persisted `ERROR` results with fixed codes
+  (`STUDY_EXECUTION_ERROR`, `INVALID_STUDY_OUTPUT`); `BaseException` propagates.
+  `ERROR` and `STALE` results and results without a snapshot are persisted but
+  never served from the cache.
+- **Validation:** `core/study_results.py` (depends only on `core.contracts`)
+  holds the status matrix and provenance validation shared by the runner and
+  SQLite deserialization, so `storage` never imports `studies`.
+- **Schema v3:** additive `provenance_json` and `cache_format_version` columns
+  plus a cache index, migrated atomically. Pre-v3 rows have NULL values and are
+  never cache hits. A corrupt eligible row raises instead of being skipped.
+- **Study version:** `RegisteredStudy.version` identifies the study's behavior;
+  any output-affecting change requires a bump. It is not a Git SHA or the
+  application version; application revision tracking is deferred.
+- **Logging:** failures log a fixed message with study ID, version and a
+  sanitized exception class name only; no message, traceback or `exc_info`.
+- **Consequences:** `DataFailure` instrument/timeframe/cutoff binding is
+  caller-asserted because `DataQualityReport` has no identity fields. Append-only
+  storage has no unique constraint, so concurrent identical cache misses may
+  create duplicate rows; this is accepted and readers use the newest row.

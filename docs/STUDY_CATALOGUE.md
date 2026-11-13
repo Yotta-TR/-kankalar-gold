@@ -70,9 +70,9 @@ Checked against the repository (not assumed):
 | Quotes and ticks | `data/quality.py` has `validate_quote` (returns a `DataQualityReport`; checks finite/invalid bid-ask, future and stale timestamps, spread limit). No tick validator was found. Quotes and ticks do not pass through `HistoricalDataPipeline`; persistence methods `save_market_quote` and `save_market_ticks` exist, and the MT5 provider has `get_ticks`. No fail-closed quote/tick ingestion path equivalent to the bar pipeline exists **[TBD]**. |
 | Instrument | The logical project identity is `GOLD_USD` [SPEC §19]; the broker symbol is `null` until discovered and confirmed from MT5 [SPEC §19]. It is commonly labelled XAUUSD, but the exact symbol is unresolved. |
 | Gap semantics (`data/quality.py`) | Without a caller-supplied `expected_open` session callback, gaps are reported as `GAP_SESSION_UNKNOWN` rather than missing data; weekends/closures are not assumed to be errors. No built-in market calendar exists. |
-| Persistence (`storage/sqlite.py`) | `save_study_result` is write-only: it appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Code inspection found **no read/query/deserialization method** for study results, so a stored result cannot currently be loaded back into a `StudyResult`. Bars, ticks, quotes, instrument specifications, data-quality events and provider-health events are also written source-aware. Schema version 2. |
+| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row (see ADR-007). Bars, ticks, quotes, instrument specifications, data-quality events and provider-health events are also written source-aware. Schema version 3. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
-| Not present | No study execution engine, no data-snapshot-ID generator (`data_snapshot_id` is only stored), no market/session calendar, no macro/COT/futures adapters, no volume-profile or order-book data. |
+| Not present | `studies/runner.py` provides a single-timeframe `StudyRunner` (no actual studies yet); `compute_bar_snapshot_id` generates snapshot IDs. No market/session calendar, no macro/COT/futures adapters, no volume-profile or order-book data. |
 
 ## 4. Common conventions
 
@@ -116,6 +116,8 @@ requires the statuses to stay distinct but does not define this table):
 | `UNAVAILABLE` | `UNAVAILABLE` |
 | `STALE` | `STALE` |
 | `ERROR` | `ERROR` |
+
+The runner maps a caller-supplied `DataFailure` one-to-one to the same-named `StudyStatus`. The current bar pipeline only emits `INSUFFICIENT_DATA` and `ERROR`; `STALE` arises from quote validation and `UNAVAILABLE` from provider failures, both mapped for future compatibility only. Invalid data never reaches `compute`.
 
 Staleness must not be inferred solely from a missing bar during a weekend or
 closure; this depends on a session calendar **[TBD]**.

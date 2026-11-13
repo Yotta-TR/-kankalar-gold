@@ -127,10 +127,15 @@ def _create_legacy_phase0_database(db_path: Path) -> None:
 
 def _legacy_phase0_records(db_path: Path) -> dict[str, list[tuple[object, ...]]]:
     with sqlite3.connect(str(db_path)) as connection:
-        return {
-            table: connection.execute(f"SELECT * FROM {table}").fetchall()
-            for table in sorted(LEGACY_PHASE0_TABLES)
-        }
+        records: dict[str, list[tuple[object, ...]]] = {}
+        for table in sorted(LEGACY_PHASE0_TABLES):
+            rows = connection.execute(f"SELECT * FROM {table}").fetchall()
+            if table == "study_results" and rows and len(rows[0]) > 16:
+                # Schema v3 appends provenance_json/cache_format_version; legacy rows keep NULL.
+                assert all(row[16:] == (None, None) for row in rows)
+                rows = [row[:16] for row in rows]
+            records[table] = rows
+        return records
 
 
 def _table_names(db_path: Path) -> set[str]:
