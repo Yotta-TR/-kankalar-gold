@@ -70,6 +70,44 @@ def test_config_rejects_non_research_settings(
         ProjectConfig.model_validate(config_data)
 
 
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("app", "safe_mode", False),
+        ("signals", "allow_live_trading", True),
+        ("notifications", "telegram_enabled", True),
+        ("risk", "mode", "live"),
+        ("instrument", "source", "other"),
+        ("app", "language", "en"),
+    ],
+)
+def test_config_rejects_assignment_after_validation(
+    section: str,
+    key: str,
+    value: object,
+) -> None:
+    config = load_config(ROOT / "config" / "defaults.yaml")
+    settings = getattr(config, section)
+    original = getattr(settings, key)
+
+    with pytest.raises(ValidationError) as error:
+        setattr(settings, key, value)
+
+    assert error.value.errors()[0]["type"] == "frozen_instance"
+    assert getattr(settings, key) == original
+
+
+def test_config_rejects_nested_section_replacement() -> None:
+    config = load_config(ROOT / "config" / "defaults.yaml")
+    original = config.app
+
+    with pytest.raises(ValidationError) as error:
+        config.app = ProjectConfig().app
+
+    assert error.value.errors()[0]["type"] == "frozen_instance"
+    assert config.app is original
+
+
 def test_as_utc_converts_offsets_and_rejects_naive_values() -> None:
     local_timestamp = datetime(2026, 1, 1, 2, tzinfo=timezone(timedelta(hours=2)))
 
