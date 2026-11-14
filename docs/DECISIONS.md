@@ -87,9 +87,8 @@
 
 ## ADR-008: F4 no-lookahead test harness and recorded pipeline boundary
 
-- **Decision:** F4 is delivered as test-only code (`tests/fixtures/point_in_time.py`,
-  `faulty_studies.py`, `adversarial_provider.py` and two test modules). No `src/`,
-  schema or cache-format change.
+- **Decision:** F4 includes a test-only harness and the production cutoff binding
+  described below. No schema or cache-format change.
 - **Method:** a result is a function of study version, configuration, cutoff and the
   selected snapshot. For the same cutoff and snapshot the full `StudyResult` must be
   exactly equal across repeats, fresh instances, evaluation orders and future-only
@@ -109,12 +108,13 @@
   unscripted clock/RNG, a held provider), which remain for the AST safety scan and review.
 - **Reference selector:** `select_completed_bars` is a test oracle, not a production
   safeguard.
-- **Recorded boundary gap (tests B1-B6):** `HistoricalDataPipeline` forwards `end_utc`
-  to the provider (which bounds bar open time) and neither filters nor validates the
-  returned bars against it; `ValidatedBarSet` checks completeness only against
-  `validated_at_utc`. `StudyRunner` rejects bars ending after the supplied `as_of_utc`
-  before `compute`. Nothing binds the pipeline `end_utc` to the runner `as_of_utc`; B4
-  characterizes this gap and is not desired behavior.
-- **Deferred:** a production change (for example validating provider output against the
-  request range, or binding `end_utc` and `as_of_utc`) needs its own review because it
-  changes `end_utc` semantics shared by the Mock and MT5 providers.
+- **Boundary gap resolved (tests B1-B6):** pipeline `end_utc` is now the inclusive
+  completion cutoff. It requests inclusive provider open-time bounds from
+  `end_utc - history_days` through `end_utc - timeframe_duration`, and rejects
+  provider overreach rather than trimming it. A bar ending at the cutoff is accepted.
+  `ValidatedBarSet` records the UTC cutoff and rejects later-ending bars;
+  `StudyRunner` requires its request `as_of_utc` to equal that cutoff before cache
+  lookup or computation. B4 now guards against the previously characterized mismatch.
+  Direct carrier construction asserts a cutoff but does not prove provider provenance.
+  `retrieve_bars` applies the same range checks but its raw tuple carries no cutoff
+  provenance; use `retrieve_validated_bars` for the normal study workflow.

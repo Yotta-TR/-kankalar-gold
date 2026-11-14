@@ -44,7 +44,9 @@ def test_validated_bar_set_preserves_report_and_normalizes_time() -> None:
         for bar in SYNTHETIC_BARS
     )
 
-    result = ValidatedBarSet.from_bars(bars, "M5", NOW.astimezone(offset))
+    result = ValidatedBarSet.from_bars(
+        bars, "M5", NOW.astimezone(offset), cutoff_utc=NOW.astimezone(offset)
+    )
 
     assert result.instrument == "TEST_GOLD"
     assert result.timeframe == "M5"
@@ -53,12 +55,14 @@ def test_validated_bar_set_preserves_report_and_normalizes_time() -> None:
     assert result.report.status is DataStatus.VALID
     assert result.report.reasons == ()
     assert result.validated_at_utc == NOW
+    assert result.cutoff_utc == NOW
+    assert result.cutoff_utc.tzinfo is timezone.utc
     assert result.expected_open is None
 
 
 def test_validated_bar_set_rejects_empty_and_inconsistent_sets() -> None:
     with pytest.raises(HistoricalDataQualityError) as empty_error:
-        ValidatedBarSet.from_bars((), "M5", NOW)
+        ValidatedBarSet.from_bars((), "M5", NOW, cutoff_utc=NOW)
     assert empty_error.value.report.reasons == ("EMPTY_HISTORY",)
 
     second = SYNTHETIC_BARS[1]
@@ -78,7 +82,7 @@ def test_validated_bar_set_rejects_empty_and_inconsistent_sets() -> None:
     )
     for bars, reason in zip(invalid_sets, expected_reasons, strict=True):
         with pytest.raises(HistoricalDataQualityError) as error:
-            ValidatedBarSet.from_bars(bars, "M5", NOW)
+            ValidatedBarSet.from_bars(bars, "M5", NOW, cutoff_utc=NOW)
         assert reason in error.value.report.reasons
 
 
@@ -101,7 +105,7 @@ def test_validated_bar_set_rejects_invalid_numeric_fields(
     bars = (replace(SYNTHETIC_BARS[0], **changes),)
 
     with pytest.raises(HistoricalDataQualityError) as error:
-        ValidatedBarSet.from_bars(bars, "M5", NOW)
+        ValidatedBarSet.from_bars(bars, "M5", NOW, cutoff_utc=NOW)
 
     assert error.value.report.status is DataStatus.ERROR
     assert reason in error.value.report.reasons
@@ -111,7 +115,7 @@ def test_non_valid_quality_report_is_preserved() -> None:
     bars = (SYNTHETIC_BARS[0], SYNTHETIC_BARS[2])
 
     with pytest.raises(HistoricalDataQualityError) as error:
-        ValidatedBarSet.from_bars(bars, "M5", NOW)
+        ValidatedBarSet.from_bars(bars, "M5", NOW, cutoff_utc=NOW)
 
     assert error.value.report.status is DataStatus.INSUFFICIENT_DATA
     assert error.value.report.reasons == ("GAP_SESSION_UNKNOWN",)
@@ -122,7 +126,9 @@ def test_session_policy_distinguishes_open_gaps_from_known_closures() -> None:
     open_gap = (_bar_at(monday), _bar_at(monday + timedelta(minutes=10)))
 
     with pytest.raises(HistoricalDataQualityError) as unknown_error:
-        ValidatedBarSet.from_bars(open_gap, "M5", monday + timedelta(hours=1))
+        ValidatedBarSet.from_bars(
+            open_gap, "M5", monday + timedelta(hours=1), cutoff_utc=monday + timedelta(hours=1)
+        )
     assert unknown_error.value.report.reasons == ("GAP_SESSION_UNKNOWN",)
 
     with pytest.raises(HistoricalDataQualityError) as missing_error:
@@ -130,6 +136,7 @@ def test_session_policy_distinguishes_open_gaps_from_known_closures() -> None:
             open_gap,
             "M5",
             monday + timedelta(hours=1),
+            cutoff_utc=monday + timedelta(hours=1),
             expected_open=_session_open,
         )
     assert missing_error.value.report.reasons == ("MISSING_BAR",)
@@ -137,13 +144,16 @@ def test_session_policy_distinguishes_open_gaps_from_known_closures() -> None:
     friday = datetime(2026, 1, 2, 16, 55, tzinfo=timezone.utc)
     weekend_gap = (_bar_at(friday), _bar_at(monday))
     with pytest.raises(HistoricalDataQualityError) as closure_unknown_error:
-        ValidatedBarSet.from_bars(weekend_gap, "M5", monday + timedelta(hours=1))
+        ValidatedBarSet.from_bars(
+            weekend_gap, "M5", monday + timedelta(hours=1), cutoff_utc=monday + timedelta(hours=1)
+        )
     assert closure_unknown_error.value.report.reasons == ("GAP_SESSION_UNKNOWN",)
 
     known_closure = ValidatedBarSet.from_bars(
         weekend_gap,
         "M5",
         monday + timedelta(hours=1),
+        cutoff_utc=monday + timedelta(hours=1),
         expected_open=_session_open,
     )
     assert known_closure.report.status is DataStatus.VALID
@@ -169,6 +179,7 @@ def test_session_policy_receives_utc_normalized_timestamps() -> None:
             bars,
             "M5",
             monday + timedelta(hours=1),
+            cutoff_utc=monday + timedelta(hours=1),
             expected_open=bounded_session,
         )
 
@@ -199,6 +210,7 @@ def test_pipeline_additive_method_returns_validated_set_without_extra_provider_a
     assert isinstance(validated, ValidatedBarSet)
     assert validated.report.status is DataStatus.VALID
     assert validated.instrument == "TEST_GOLD"
+    assert validated.cutoff_utc == NOW
     assert provider.calls == 1
 
 
@@ -233,3 +245,17 @@ def test_existing_retrieval_still_returns_tuple_and_mock_needs_no_network() -> N
 
     assert isinstance(bars, tuple)
     assert bars == SYNTHETIC_BARS
+
+
+def test_cutoff_is_required_and_independent_of_validation_time() -> None:
+    later = NOW + timedelta(hours=1)
+    validated = ValidatedBarSet.from_bars(SYNTHETIC_BARS, "M5", later, cutoff_utc=NOW)
+    assert validated.cutoff_utc == NOW
+    with pytest.raises(ValueError, match="complete after"):
+        ValidatedBarSet.from_bars(
+            SYNTHETIC_BARS, "M5", later, cutoff_utc=NOW - timedelta(microseconds=1)
+        )
+    with pytest.raises(ValueError, match="later than"):
+        ValidatedBarSet.from_bars(SYNTHETIC_BARS, "M5", NOW, cutoff_utc=later)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        ValidatedBarSet.from_bars(SYNTHETIC_BARS, "M5", NOW, cutoff_utc=NOW.replace(tzinfo=None))

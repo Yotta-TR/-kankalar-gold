@@ -163,6 +163,8 @@ class StudyRunner:
             raise StudyRequestError("bars must be a ValidatedBarSet")
         if bars.instrument != request.instrument or bars.timeframe != request.timeframe:
             raise StudyRequestError("bar set does not match the request instrument/timeframe")
+        if bars.cutoff_utc != request.as_of_utc:
+            raise StudyRequestError("bar set cutoff does not match the request cutoff")
         duration = TIMEFRAME_DURATIONS.get(request.timeframe)
         if duration is None:
             raise StudyRequestError("unsupported timeframe")

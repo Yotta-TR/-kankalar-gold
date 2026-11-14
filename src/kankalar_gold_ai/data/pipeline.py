@@ -47,17 +47,18 @@ class HistoricalDataPipeline:
         Args:
             instrument: symbol name (e.g., 'XAUUSD')
             timeframe: one of M1, M5, M15, H1, H4, D1
-            end_utc: end of the range (inclusive)
+            end_utc: inclusive bar-completion cutoff
             history_days: number of trading/calendar days to retrieve
             expected_open: optional callable to check if a session was open at a given time
 
         Returns:
-            tuple of MarketBar objects, sorted by timestamp ascending
+            tuple of MarketBar objects, sorted by timestamp ascending. This raw
+            tuple carries no cutoff provenance; use retrieve_validated_bars for studies.
 
         Raises:
             ValueError: if arguments are invalid or retrieved bars fail validation
         """
-        bars, now = self._retrieve_bars(instrument, timeframe, end_utc, history_days)
+        bars, now, _cutoff = self._retrieve_bars(instrument, timeframe, end_utc, history_days)
         report = validate_bars(bars, timeframe, now, expected_open=expected_open)
         self._require_valid(report)
         return bars
@@ -70,12 +71,13 @@ class HistoricalDataPipeline:
         history_days: int,
         expected_open: Callable[[datetime], bool] | None = None,
     ) -> ValidatedBarSet:
-        """Retrieve bars through the existing provider path and return a validated carrier."""
-        bars, now = self._retrieve_bars(instrument, timeframe, end_utc, history_days)
+        """Retrieve bars completed by end_utc and bind them to that cutoff."""
+        bars, now, cutoff = self._retrieve_bars(instrument, timeframe, end_utc, history_days)
         return ValidatedBarSet.from_bars(
             bars,
             timeframe,
             now,
+            cutoff_utc=cutoff,
             expected_open=expected_open,
             expected_instrument=instrument,
         )
@@ -86,7 +88,7 @@ class HistoricalDataPipeline:
         timeframe: str,
         end_utc: datetime,
         history_days: int,
-    ) -> tuple[tuple[MarketBar, ...], datetime]:
+    ) -> tuple[tuple[MarketBar, ...], datetime, datetime]:
         if timeframe not in self.SUPPORTED_TIMEFRAMES:
             raise ValueError(f"unsupported timeframe: {timeframe}")
         if history_days < 1 or history_days > self.MAX_HISTORY_DAYS:
@@ -98,7 +100,17 @@ class HistoricalDataPipeline:
         if end > now:
             raise ValueError(f"end_utc ({end}) must not be in the future (now={now})")
         start = end - timedelta(days=history_days)
-        return self._provider.get_bars(instrument, timeframe, start, end), now
+        duration = TIMEFRAME_DURATIONS[timeframe]
+        provider_end = end - duration
+        bars = self._provider.get_bars(instrument, timeframe, start, provider_end)
+        for bar in bars:
+            if not isinstance(bar, MarketBar):
+                raise TypeError("provider must return MarketBar instances")
+            if not start <= bar.timestamp_utc <= provider_end:
+                raise ValueError("provider returned a bar outside the requested open-time range")
+            if bar.timestamp_utc + duration > end:
+                raise ValueError("provider returned a bar completing after the cutoff")
+        return bars, now, end
 
     def latest_complete_bar(
         self,

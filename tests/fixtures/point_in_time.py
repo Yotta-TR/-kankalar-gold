@@ -174,7 +174,7 @@ def run_at(
     store: Any = None,
 ) -> StudyResult:
     selected = select_completed_bars(universe, timeframe, cutoff)
-    bars = ValidatedBarSet.from_bars(selected, timeframe, validated_at or cutoff)
+    bars = ValidatedBarSet.from_bars(selected, timeframe, validated_at or cutoff, cutoff_utc=cutoff)
     registry = StudyRegistry()
     registry.register(study)
     runner = StudyRunner(registry, store if store is not None else NullStore())

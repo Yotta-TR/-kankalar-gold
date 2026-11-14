@@ -197,7 +197,7 @@ Dependencies are separated into three tiers.
 | F1 | Study Execution Engine (run studies on validated, closed-bar data; emit `StudyResult`) | Implemented as a single-timeframe `StudyRunner` (ADR-007); no multi-timeframe orchestration, scheduling or actual studies |
 | F2 | Reproducible data-snapshot identity and provenance | Implemented: `compute_bar_snapshot_id` and structured `StudyResult.provenance`; Git/application revision tracking deferred |
 | F3 | Configuration/version handling (study config and version registry) | Implemented: `StudyRegistry`, scalar config validation, explicit study versions |
-| F4 | No-lookahead safeguards (test harness) | Runtime cutoff protections exist (`as_of_utc` checks, closed-bar `ValidatedBarSet`). A reusable test-only point-in-time harness is added in `tests/` (ADR-008). Not enforced in production: the pipeline `end_utc` is not bound to the runner `as_of_utc` |
+| F4 | No-lookahead safeguards (test harness) | Runtime cutoff protections and a reusable test-only point-in-time harness are implemented (ADR-008). Pipeline `end_utc` is an inclusive completion cutoff; provider overreach is rejected, and the runner requires the carrier cutoff to match `as_of_utc`. Raw `retrieve_bars` returns no cutoff provenance; use `retrieve_validated_bars` for studies. |
 | F5 | Mapping from `DataStatus` to `StudyStatus` (§4.3) | Implemented for a caller-supplied `DataFailure` (`run_data_failure`). Not integrated: the pipeline does not produce a `DataFailure` and `HistoricalDataQualityError` is not converted into a result automatically |
 
 **B. Conditional dependencies** (only for studies that need them):
@@ -438,7 +438,7 @@ FOUNDATION → BASELINE → STRUCTURE → DATA_DEPENDENT → ADVANCED.
 1. Partly resolved (ADR-007): single-timeframe engine, registry and configuration versioning exist (F1, F3). Open: multi-timeframe orchestration and scheduling.
 2. Partly resolved (ADR-007): snapshot ID generation and structured provenance exist (F2). Open: Git/application revision tracking.
 3. Session/market calendar and the policy for staleness during closures (C1, for session-dependent studies).
-4. Partly resolved (ADR-007): `DataStatus` → `StudyStatus` mapping exists for caller-supplied `DataFailure`. Open: automatic pipeline-to-runner failure wiring, and whether to bind the pipeline `end_utc` to the runner `as_of_utc` (ADR-008).
+4. Partly resolved (ADR-007): `DataStatus` → `StudyStatus` mapping exists for caller-supplied `DataFailure`. The pipeline cutoff is bound to the runner cutoff (ADR-008). Open: automatic pipeline-to-runner failure wiring.
 5. Warm-up lengths, parameters, and formulas for every study (none are approved; spec examples are illustrative).
 6. Direction semantics for each trend/structure study.
 7. Operational definitions and non-repainting rules for swings, BOS/CHoCH, zones, ranges, sessions, FVG, liquidity sweeps, and each candlestick pattern.

@@ -125,8 +125,8 @@ def _request(**changes: object) -> StudyRunRequest:
     return StudyRunRequest(**values)  # type: ignore[arg-type]
 
 
-def _bars(count: int = 3, validated_at: datetime = NOW) -> ValidatedBarSet:
-    return ValidatedBarSet.from_bars(SYNTHETIC_BARS[:count], "M5", validated_at)
+def _bars(count: int = 3, validated_at: datetime = NOW, cutoff: datetime = NOW) -> ValidatedBarSet:
+    return ValidatedBarSet.from_bars(SYNTHETIC_BARS[:count], "M5", validated_at, cutoff_utc=cutoff)
 
 
 def test_success_result_provenance_and_inputs(tmp_path: Path) -> None:
@@ -158,9 +158,8 @@ def test_cache_hit_does_not_compute_or_save_again(tmp_path: Path) -> None:
 def test_different_cutoffs_never_share_cache(tmp_path: Path) -> None:
     runner, study, store = _setup(tmp_path)
     later = NOW + timedelta(minutes=15)
-    bars = _bars(validated_at=later)
-    first = runner.run(_request(), bars)
-    second = runner.run(_request(as_of_utc=later), bars)
+    first = runner.run(_request(), _bars(validated_at=later))
+    second = runner.run(_request(as_of_utc=later), _bars(validated_at=later, cutoff=later))
     assert first.as_of_utc == NOW and second.as_of_utc == later
     assert study.compute_calls == 2 and store.saves == 2
 
@@ -276,13 +275,31 @@ def test_request_validation() -> None:
 
 
 def test_cutoff_rules(tmp_path: Path) -> None:
-    runner, study, _store = _setup(tmp_path)
-    with pytest.raises(StudyRequestError, match="cutoff"):
-        runner.run(_request(as_of_utc=NOW - timedelta(minutes=5)), _bars())
+    runner, study, store = _setup(tmp_path)
+    bars = _bars(validated_at=NOW + timedelta(minutes=5))
+    assert runner.run(_request(), bars).as_of_utc == NOW
+    assert study.compute_calls == 1 and store.lookups == 1 and store.saves == 1
+    for cutoff in (NOW - timedelta(minutes=5), NOW + timedelta(minutes=5)):
+        with pytest.raises(StudyRequestError, match="cutoff"):
+            runner.run(_request(as_of_utc=cutoff), bars)
+    assert study.compute_calls == 1 and store.lookups == 1 and store.saves == 1
+    offset = timezone(timedelta(hours=3))
+    assert runner.run(_request(as_of_utc=NOW.astimezone(offset)), bars).as_of_utc == NOW
+    assert study.compute_calls == 1 and store.lookups == 2 and store.saves == 1
+
+
+def test_cutoff_defense_in_depth_rejects_corrupted_carriers(tmp_path: Path) -> None:
+    runner, study, store = _setup(tmp_path)
+    bars = _bars()
+    object.__setattr__(bars, "cutoff_utc", NOW - timedelta(minutes=5))
+    with pytest.raises(StudyRequestError, match="extend past"):
+        runner.run(_request(as_of_utc=bars.cutoff_utc), bars)
+
+    bars = _bars()
+    object.__setattr__(bars, "validated_at_utc", NOW - timedelta(minutes=5))
     with pytest.raises(StudyRequestError, match="validation time"):
-        runner.run(_request(as_of_utc=NOW + timedelta(minutes=5)), _bars())
-    assert runner.run(_request(as_of_utc=NOW), _bars()).as_of_utc == NOW
-    assert study.compute_calls == 1
+        runner.run(_request(), bars)
+    assert study.compute_calls == store.lookups == store.saves == 0
 
 
 def test_mutating_caller_config_does_not_change_study_copy(tmp_path: Path) -> None:
