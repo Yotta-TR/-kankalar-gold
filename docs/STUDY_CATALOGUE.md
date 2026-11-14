@@ -1,6 +1,8 @@
 # Study Catalogue
 
-Status: **documentation only**. No study is implemented, approved, or activated.
+Status: This catalogue documents research candidates. `volatility.atr` and
+`trend.ma_slope_order` are implemented as descriptive studies; listing or
+implementation does not imply predictive approval or ensemble activation.
 This catalogue organizes the research candidates of Sections 5.1–5.6 of
 [`KANKALAR_GOLD_AI_MASTER_SPEC_v0.1.md`](../KANKALAR_GOLD_AI_MASTER_SPEC_v0.1.md)
 (the "master spec", which remains canonical) into implementable specification
@@ -18,7 +20,7 @@ Unlabelled text is organizational, or restates the verified code facts in §3.
 | **[TBD]** | `TBD — requires an explicit research/design decision`. Unresolved; nothing is assumed. |
 | **[SUGGESTION]** | A non-binding recommendation or question. It is not an approved requirement. |
 
-Being listed here does **not** approve a study for implementation, activation in
+Being listed here does **not** by itself approve implementation, activation in
 the signal ensemble, or any decision use. Activation is conditional on evidence
 [SPEC §5 intro].
 
@@ -121,9 +123,9 @@ specific.
 | `status` | `AVAILABLE` only when inputs are `VALID` and the warm-up is satisfied. `INSUFFICIENT_DATA` (not enough history), `UNAVAILABLE` (source/feature absent), `STALE` (inputs too old), `ERROR` (failure/malformed) [SPEC §6]. |
 | `value` / `normalized_value` / `uncertainty` | `None` when not computable; never substituted with `0.0` [SPEC §6]. |
 | `direction` | `BULLISH`/`BEARISH`/`NEUTRAL` only where meaningful, otherwise `NOT_APPLICABLE` [SPEC §6]. |
-| `inputs` | Records the configuration/parameters and input window [SPEC §6]. |
+| `inputs` | Records configuration/parameters; input window is recorded in provenance [SPEC §6]. |
 | `evidence`, `limitations` | Human-readable; limitations are mandatory (e.g. tick-volume caveat) [SPEC §6]. |
-| `data_snapshot_id` | Identifies the exact data used [SPEC §6]; generation mechanism **[TBD]**. |
+| `data_snapshot_id` | Bar input snapshots use `compute_bar_snapshot_id`; explicit data failures have no snapshot [SPEC §6]. |
 | `as_of_utc`, `instrument`, `timeframe` | Always populated, UTC [SPEC §3, §6]. |
 
 ### 4.3 Data-quality dependency mapping
@@ -145,10 +147,10 @@ statuses to stay distinct but does not define this table):
 | `STALE` | `STALE` |
 | `ERROR` | `ERROR` |
 
-The runner maps a caller-supplied `DataFailure` one-to-one to the same-named `StudyStatus`. The current bar pipeline only emits `INSUFFICIENT_DATA` and `ERROR`; `STALE` arises from quote validation and `UNAVAILABLE` from provider failures, both mapped for future compatibility only. Invalid data never reaches `compute`.
+The runner maps a caller-supplied `DataFailure` one-to-one to the same-named `StudyStatus`. The coordinator also maps stale validated bars to a `STALE` failure without computing. The bar pipeline does not automatically produce a `DataFailure`; invalid data never reaches `compute`.
 
-Staleness must not be inferred solely from a missing bar during a weekend or
-closure; this depends on a session calendar **[TBD]**.
+The fixed coordinator freshness policy has no weekend or closure exemption;
+a session-aware policy remains **[TBD]**.
 
 ### 4.4 Common closed-bar / point-in-time behavior
 
@@ -257,7 +259,7 @@ are correlated with each other and must be grouped (§2).
 
 | ID | Candidate | Spec definition | Parameters (spec-supported) | Output/states |
 |---|---|---|---|---|
-| `trend.ma_slope_order` | EMA / SMA slope and ordering | Slope and ordering of moving averages | Example 20/50/200 "as initial descriptive features, not universal trading rules"; EMA vs SMA and slope definition **[TBD]** | Ordering/slope state labels **[TBD]**; direction may be `BULLISH`/`BEARISH`/`NEUTRAL` **[TBD]** |
+| `trend.ma_slope_order` | SMA slope and ordering | Descriptive fast/middle/slow SMA ordering and fast-SMA slope | v0.1.0 uses explicit periods, lookback and flat threshold; no defaults | Nine ordering/slope states; jointly aligned up/down gives `BULLISH`/`BEARISH`, otherwise `NEUTRAL` |
 | `trend.adx_dm` | ADX and directional movement | Named only | Period **[TBD]** | Trend strength and directional movement **[TBD]**; formula not defined in spec |
 | `trend.rsi` | RSI level, slope, regime-aware interpretation | Level and slope; interpretation depends on regime | Period/levels **[TBD]** | Level/slope; regime dependence implies a link to Group 4 **[TBD]** |
 | `trend.macd` | MACD | Level, signal relationship, histogram change, zero-line context | Fast/slow/signal **[TBD]** | Components above; states **[TBD]** |
@@ -265,7 +267,7 @@ are correlated with each other and must be grouped (§2).
 | `trend.donchian` | Donchian channel position and breakout state | Position within channel; breakout state | Lookback **[TBD]**; whether the current forming bar is excluded must follow closed-bar rule | Position, breakout state **[TBD]** |
 | `trend.atr_trend` | Supertrend or other ATR-based trend descriptors | "As candidates, not assumed superior" | ATR period/multiplier **[TBD]** | State **[TBD]**; repainting-prone indicators need explicit tests |
 
-Entry-level details common to all seven: warm-up **[TBD]** (must emit
+For the other six entries, warm-up is **[TBD]** (must emit
 `INSUFFICIENT_DATA` before it is met); data-quality dependency: `VALID` bars
 for the full lookback; specific tests: warm-up boundary, closed-bar only,
 missing bar behavior, no-lookahead; out-of-sample: §4.6, metric **[TBD]**.
@@ -273,6 +275,43 @@ Prerequisites: core F1–F5 only; no session calendar (C1) is required. D1/D2
 apply only before combining results as decision evidence or claiming
 predictive contribution. `trend.atr_trend` additionally depends on the ATR study
 `volatility.atr` (§8).
+
+### 6.1 `trend.ma_slope_order` v0.1.0
+
+- **Configuration:** All five fields are required: positive built-in integer
+  `fast_period < middle_period < slow_period`, positive built-in integer
+  `slope_lookback`, and finite non-negative numeric
+  `flat_slope_fraction_per_bar` (booleans excluded). No implicit defaults.
+  20/50/200 is only an illustrative research configuration, not a universal rule.
+- **Formula:** For closes `C` at the last completed bar `t`,
+  `SMA_p(t) = fsum(C[t-p+1:t+1]) / p`. Let `F = SMA_fast(t)`,
+  `P = SMA_fast(t-lookback)`, and `delta = F-P`. `value = delta/lookback`;
+  `normalized_value = (delta/P)/lookback`, a dimensionless fraction per
+  observed bar, not a percentage or probability. No rounding precedes comparison.
+  Minimum bars are `max(slow_period, fast_period + slope_lookback)`.
+- **States:** Strict `fast > middle > slow` gives ordering `UP`; strict
+  `fast < middle < slow` gives `DOWN`; all other cases, including equality, give
+  `MIXED`. Normalized slope greater than the explicit threshold gives `UP`,
+  less than its negative gives `DOWN`, and otherwise gives `FLAT`, including
+  boundary equality. The nine states are `ORDER_UP_SLOPE_UP`,
+  `ORDER_UP_SLOPE_DOWN`, `ORDER_UP_SLOPE_FLAT`, `ORDER_DOWN_SLOPE_UP`,
+  `ORDER_DOWN_SLOPE_DOWN`, `ORDER_DOWN_SLOPE_FLAT`, `ORDER_MIXED_SLOPE_UP`,
+  `ORDER_MIXED_SLOPE_DOWN`, and `ORDER_MIXED_SLOPE_FLAT`.
+  Only up/up is `BULLISH`, only down/down is `BEARISH`; other available states
+  are `NEUTRAL`, not a claim that the market is sideways. `uncertainty` is `None`.
+- **Inputs and safety:** M1, M5, M15, H1, H4 and D1 are independent
+  single-timeframe executions. Only trailing validated completed closes affect
+  calculations; accepted closure gaps count as observed bars. Positive finite
+  subnormal denominators are permitted. Non-positive denominators, non-finite
+  arithmetic and overflow cause a runner `ERROR`, retaining the input snapshot.
+  Stale and explicit failed data follow the coordinator/runner failure paths.
+- **Limitations and tests:** This is a lagging, parameter-sensitive description,
+  not a prediction, recommendation or probability. It uses no volume, ATR,
+  external data or live connection. Its close-derived outputs are correlated
+  with other moving-average and momentum studies; ATR dependence should be
+  evaluated, not assumed independent. Synthetic tests cover numerical examples,
+  all states, boundaries, configuration, warm-up, numerical failures, data
+  quality, no-lookahead, all timeframes, caching and SQLite persistence.
 
 ## 7. Group 2 — Market structure and price action [SPEC §5.2]
 

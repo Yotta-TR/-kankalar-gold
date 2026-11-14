@@ -198,3 +198,22 @@
   configuration remain unchanged.
 - **Scope:** No aggregation of directional conclusions, scores, probabilities,
   recommendations, or real order execution is introduced.
+
+## ADR-012: Descriptive SMA ordering and fast slope
+
+- **Decision:** Implement `trend.ma_slope_order` v0.1.0 as independent
+  single-timeframe M1, M5, M15, H1, H4 and D1 runs. All three SMA periods,
+  slope lookback and flat fractional-slope threshold are explicit configuration.
+  EMA and any universal 20/50/200 default are not included.
+- **Definition:** Calculate trailing close SMAs using `math.fsum`. The raw
+  fast-SMA slope is `(fast_now - fast_previous) / lookback`; normalized slope
+  divides that difference by the previous fast SMA and then by lookback.
+  Warm-up is `max(slow_period, fast_period + lookback)`. Strict ordering and
+  threshold comparisons produce the nine states specified in the catalogue.
+- **Output and safety:** Only up/up and down/down are respectively bullish and
+  bearish descriptive alignment; all other available states are neutral.
+  Positive finite subnormal denominators are permitted; non-positive
+  denominators and non-finite arithmetic fail through the runner's `ERROR`
+  path. A neutral state does not assert a sideways market.
+- **Scope:** This is not a forecast, trading recommendation or probability.
+  No cross-timeframe combination, external data, or ATR dependency is added.
