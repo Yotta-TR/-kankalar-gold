@@ -118,3 +118,24 @@
   Direct carrier construction asserts a cutoff but does not prove provider provenance.
   `retrieve_bars` applies the same range checks but its raw tuple carries no cutoff
   provenance; use `retrieve_validated_bars` for the normal study workflow.
+
+## ADR-009: Independent study execution across supported timeframes
+
+- **Decision:** One registered `(study_id, version)` may declare multiple
+  `required_timeframes`; that set means supported, independent single-timeframe
+  invocations. `StudyRunner` still accepts exactly one `StudyRunRequest` and one
+  matching `ValidatedBarSet`, and returns exactly one `StudyResult`. It accepts
+  a request only when its timeframe is a member of the registered set.
+- **Reason:** Ordinary studies such as ATR can be executed independently on
+  several timeframes without duplicate registry identities or forcing
+  multi-timeframe inputs into their calculation contracts.
+- **Identity:** Every timeframe execution retains its own `StudyResult.timeframe`,
+  input snapshot and cache identity. The existing cache key already includes
+  timeframe; the SQLite schema and `StudyResult` contract do not change.
+- **Compatibility:** Singleton timeframe registrations retain their existing
+  behavior. Unsupported timeframes fail during study resolution before cache
+  lookup, computation or persistence.
+- **Scope:** `volatility.atr` v0.1.0 supports M1, M5, M15, H1, H4 and D1 as
+  independent runs. Coordinating results at a common cutoff, freshness rules,
+  composite snapshots and persisted analysis bundles are future work and are
+  not implemented by this decision.

@@ -72,7 +72,8 @@ Checked against the repository (not assumed):
 | Gap semantics (`data/quality.py`) | Without a caller-supplied `expected_open` session callback, gaps are reported as `GAP_SESSION_UNKNOWN` rather than missing data; weekends/closures are not assumed to be errors. No built-in market calendar exists. |
 | Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row (see ADR-007). Bars, ticks, quotes, instrument specifications, data-quality events and provider-health events are also written source-aware. Schema version 3. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
-| Not present | `studies/runner.py` provides a single-timeframe `StudyRunner` (no actual studies yet); `compute_bar_snapshot_id` generates snapshot IDs. No market/session calendar, no macro/COT/futures adapters, no volume-profile or order-book data. |
+| Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. No cross-timeframe coordinator exists yet. |
+| Not present | No market/session calendar, no macro/COT/futures adapters, no volume-profile or order-book data. |
 
 ## 4. Common conventions
 
@@ -287,7 +288,7 @@ bars (or intraday returns derived from them) from the verified broker gold instr
 
 | ID | Candidate | Spec text | Type | Priority |
 |---|---|---|---|---|
-| `volatility.atr` | True Range and ATR over multiple horizons | Horizons **[TBD]**; the spec example shows `atr_period: 14` only as an illustrative `inputs` value [SPEC §6], not a mandated default | descriptive | BASELINE |
+| `volatility.atr` | True Range and ATR over multiple horizons | Horizons remain **[TBD]**; version `0.1.0` supports M1, M5, M15, H1, H4 and D1 as independent executions, each with explicit `atr_period`. The initial selected run uses 14; the spec example's period 14 is illustrative, not a master-spec default [SPEC §6]. | descriptive | BASELINE |
 | `volatility.realized` | Realized volatility from intraday returns | Return sampling frequency **[TBD]** | descriptive | BASELINE |
 | `volatility.ewma` | EWMA volatility | Decay parameter **[TBD]** | descriptive | BASELINE |
 | `volatility.percentile_clustering` | Volatility clustering and volatility percentile | Window and clustering measure **[TBD]** | descriptive | BASELINE |
@@ -297,18 +298,26 @@ bars (or intraday returns derived from them) from the verified broker gold instr
 | `volatility.har_rv` | HAR-RV candidate for multi-horizon realized-volatility dynamics | Depends on `volatility.realized` | statistical | ADVANCED |
 | `volatility.change_point` | Change-point detection for abrupt regime changes | Method **[TBD]**; Bayesian variant also appears in §9 | statistical | ADVANCED |
 
-Details: `volatility.atr_regime` appears only as an example ID in [SPEC §6]; its
-state names (e.g. `EXPANDING`) and "percentile above the configured threshold"
-are illustrative, and thresholds are **[TBD]**. Limitations: no directional
-claim; broker tick volume caveat where volume is used; model-fit studies carry
-fitting uncertainty, and `uncertainty` stays `None` unless computed. Leakage
-risk: fitted models must be fit only on data preceding `as_of_utc`; percentile
-windows must exclude future data; change-point detectors must not be re-labelled
-retroactively. Tests: ATR/true-range boundaries with gaps, warm-up, missing
-bars, fit-failure → `ERROR`, no-lookahead, refit determinism for fitted
-models. Out-of-sample: §4.6 with volatility-forecast metrics **[TBD]**.
-Prerequisites: core F1–F5 (no C1); statistical models additionally need a
-dependency decision **[TBD]**, and D2 before any predictive claim.
+Details: the canonical master-spec requirements are True Range/ATR over multiple
+horizons, closed-bar point-in-time behavior, and no directional prediction from
+volatility alone [SPEC §§3, 5.3, 6]. Approved initial implementation choices for
+`volatility.atr` v0.1.0 are independent M1, M5, M15, H1, H4 and D1 executions,
+explicitly supplied positive built-in integer `atr_period`, omitted first-bar
+TR (N periods require N+1 bars), and Wilder smoothing seeded by the arithmetic
+mean of the first N TR values.
+Each run consumes one timeframe only and has its own result, snapshot, and cache
+identity; the current set of six supported timeframes does not mean one run
+combines them.
+The initial selected run configuration uses `atr_period=14`; it is not a
+specification-wide default. Output is descriptive price-unit ATR, without state,
+normalized value, uncertainty, or trade recommendation. `volatility.atr_regime`
+and labels such as `EXPANDING` remain illustrative only. Future horizons and
+any additional supported timeframes beyond the six are unresolved. Coordinated
+multi-timeframe analysis at a common cutoff is future work and is not implemented.
+Other volatility studies retain their listed TBDs; fitted models must use only
+data available at `as_of_utc`, and statistical models need a dependency decision
+**[TBD]**.
+Prerequisites: core F1–F5 (no C1); D2 is required before any predictive claim.
 
 ## 9. Group 4 — Market regime detection [SPEC §5.4]
 

@@ -129,10 +129,8 @@ class StudyRunner:
         if type(request) is not StudyRunRequest:
             raise StudyRequestError("request must be a StudyRunRequest")
         registered = self._registry.get(request.study_id, request.version)
-        if registered.required_timeframes != frozenset({request.timeframe}):
-            raise StudyRequestError(
-                "only single-timeframe studies matching the request timeframe are supported"
-            )
+        if request.timeframe not in registered.required_timeframes:
+            raise StudyRequestError("study does not support the requested timeframe")
         return registered
 
     @staticmethod

@@ -22,7 +22,11 @@ STUDY_OUTPUT_STATUSES = frozenset(
 
 
 class BarStudy(Protocol):
-    """A deterministic computation over validated completed OHLC bars."""
+    """A deterministic computation over one timeframe of validated completed OHLC bars.
+
+    ``required_timeframes`` lists independently supported run timeframes. A study
+    execution receives bars for exactly one requested timeframe.
+    """
 
     study_id: str
     version: str

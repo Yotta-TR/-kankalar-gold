@@ -26,6 +26,7 @@ from kankalar_gold_ai.core.study_results import (
     is_cache_eligible,
     validate_study_result,
 )
+from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS
 from kankalar_gold_ai.data.validated import ValidatedBarSet
 from kankalar_gold_ai.storage.sqlite import SQLitePersistence
 from kankalar_gold_ai.studies import (
@@ -127,6 +128,25 @@ def _request(**changes: object) -> StudyRunRequest:
 
 def _bars(count: int = 3, validated_at: datetime = NOW, cutoff: datetime = NOW) -> ValidatedBarSet:
     return ValidatedBarSet.from_bars(SYNTHETIC_BARS[:count], "M5", validated_at, cutoff_utc=cutoff)
+
+
+def _bars_for_timeframe(timeframe: str) -> ValidatedBarSet:
+    duration = TIMEFRAME_DURATIONS[timeframe]
+    bars = tuple(
+        MarketBar(
+            instrument="TEST_GOLD",
+            timeframe=timeframe,
+            timestamp_utc=NOW - duration * (3 - index),
+            open=100.0 + index,
+            high=101.0 + index,
+            low=99.0 + index,
+            close=100.0 + index,
+            volume=None,
+            source="synthetic-runner-fixture",
+        )
+        for index in range(3)
+    )
+    return ValidatedBarSet.from_bars(bars, timeframe, NOW, cutoff_utc=NOW)
 
 
 def test_success_result_provenance_and_inputs(tmp_path: Path) -> None:
@@ -247,14 +267,25 @@ def test_resolution_and_request_errors(tmp_path: Path) -> None:
     assert study.compute_calls == 0 and store.saves == 0
 
 
-def test_multi_timeframe_study_is_rejected(tmp_path: Path) -> None:
+def test_multi_timeframe_registration_runs_independently_and_rejects_unsupported(
+    tmp_path: Path,
+) -> None:
     runner, study, _store = _setup(tmp_path)
     object.__setattr__(
         runner._registry.get("trend.fake", "1.0.0"), "required_timeframes", frozenset({"M5", "H1"})
     )
-    with pytest.raises(StudyRequestError):
-        runner.run(_request(), _bars())
-    assert study.compute_calls == 0
+    m5_result = runner.run(_request(), _bars())
+    h1_result = runner.run(_request(timeframe="H1"), _bars_for_timeframe("H1"))
+
+    assert m5_result.timeframe == "M5"
+    assert h1_result.timeframe == "H1"
+    assert study.compute_calls == 2
+    assert _store.lookups == 2 and _store.saves == 2
+
+    with pytest.raises(StudyRequestError, match="does not support"):
+        runner.run(_request(timeframe="M1"), _bars_for_timeframe("M1"))
+    assert study.compute_calls == 2
+    assert _store.lookups == 2 and _store.saves == 2
 
 
 def test_request_validation() -> None:
