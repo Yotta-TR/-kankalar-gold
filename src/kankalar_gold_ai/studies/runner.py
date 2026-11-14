@@ -117,6 +117,83 @@ class DataFailure:
     report: DataQualityReport
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedStudyRun:
+    """Validated, normalized run metadata prepared without cache or persistence I/O."""
+
+    request: StudyRunRequest
+    study_id: str
+    version: str
+    normalized_config: Mapping[str, ConfigValue]
+    min_bars: int
+    data_status: DataStatus
+    input_bar_count: int | None
+    input_source: str | None
+    input_window_start_utc: datetime | None
+    input_window_end_utc: datetime | None
+    latest_completed_at_utc: datetime | None
+    data_snapshot_id: str | None
+    data_failure_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.request) is not StudyRunRequest:
+            raise StudyRequestError("prepared request must be a StudyRunRequest")
+        for name, value in (("study_id", self.study_id), ("version", self.version)):
+            if type(value) is not str or not value:
+                raise StudyRequestError(f"prepared {name} must be a non-empty built-in string")
+        if type(self.min_bars) is not int or self.min_bars < 1:
+            raise StudyRequestError("prepared min_bars must be a positive built-in integer")
+        if type(self.data_status) is not DataStatus:
+            raise StudyRequestError("prepared data_status must be a DataStatus")
+        try:
+            normalized = validate_config_values(self.normalized_config)
+        except Exception as error:
+            raise StudyRequestError("prepared configuration is invalid") from error
+        object.__setattr__(self, "normalized_config", MappingProxyType(normalized))
+        if type(self.data_failure_reasons) is not tuple or any(
+            type(reason) is not str for reason in self.data_failure_reasons
+        ):
+            raise StudyRequestError("prepared data failure reasons must be a tuple of strings")
+
+        metadata = (
+            self.input_bar_count,
+            self.input_source,
+            self.input_window_start_utc,
+            self.input_window_end_utc,
+            self.latest_completed_at_utc,
+            self.data_snapshot_id,
+        )
+        if self.data_status is DataStatus.VALID:
+            if (
+                type(self.input_bar_count) is not int
+                or self.input_bar_count < 1
+                or type(self.input_source) is not str
+                or not self.input_source
+                or any(
+                    not _is_aware_datetime(value)
+                    for value in (
+                        self.input_window_start_utc,
+                        self.input_window_end_utc,
+                        self.latest_completed_at_utc,
+                    )
+                )
+                or type(self.data_snapshot_id) is not str
+                or not self.data_snapshot_id
+                or self.data_failure_reasons
+            ):
+                raise StudyRequestError("prepared valid-data metadata is incomplete")
+            assert isinstance(self.input_window_start_utc, datetime)
+            assert isinstance(self.input_window_end_utc, datetime)
+            assert isinstance(self.latest_completed_at_utc, datetime)
+            object.__setattr__(self, "input_window_start_utc", _utc(self.input_window_start_utc))
+            object.__setattr__(self, "input_window_end_utc", _utc(self.input_window_end_utc))
+            object.__setattr__(self, "latest_completed_at_utc", _utc(self.latest_completed_at_utc))
+        elif any(value is not None for value in metadata):
+            raise StudyRequestError("prepared failed-data metadata must not contain bar inputs")
+        elif not self.data_failure_reasons:
+            raise StudyRequestError("prepared failed-data input requires failure reasons")
+
+
 class StudyRunner:
     """Runs one registered study on one validated bar set, or records a data failure."""
 
@@ -155,10 +232,23 @@ class StudyRunner:
             raise StudyExecutionError("constructed study result is invalid") from error
 
     # -- public API --------------------------------------------------------
-    def run(self, request: StudyRunRequest, bars: ValidatedBarSet) -> StudyResult:
+    def prepare(
+        self, request: StudyRunRequest, input_data: ValidatedBarSet | DataFailure
+    ) -> PreparedStudyRun:
+        """Validate one single-timeframe input and normalize config without executing it."""
         registered = self._resolve(request)
-        if type(bars) is not ValidatedBarSet:
-            raise StudyRequestError("bars must be a ValidatedBarSet")
+        if type(input_data) is ValidatedBarSet:
+            return self._prepare_bars(registered, request, input_data)
+        if type(input_data) is DataFailure:
+            return self._prepare_failure(registered, request, input_data)
+        raise StudyRequestError("input_data must be a ValidatedBarSet or DataFailure")
+
+    @staticmethod
+    def _prepare_bars(
+        registered: RegisteredStudy,
+        request: StudyRunRequest,
+        bars: ValidatedBarSet,
+    ) -> PreparedStudyRun:
         if bars.instrument != request.instrument or bars.timeframe != request.timeframe:
             raise StudyRequestError("bar set does not match the request instrument/timeframe")
         if bars.cutoff_utc != request.as_of_utc:
@@ -173,11 +263,62 @@ class StudyRunner:
         if request.as_of_utc > _utc(bars.validated_at_utc):
             raise StudyRequestError("analysis cutoff is later than the data validation time")
 
-        normalized, minimum = self._normalize(registered, request)
+        normalized, minimum = StudyRunner._normalize(registered, request)
         try:
             snapshot_id = compute_bar_snapshot_id(bars.bars)
         except Exception as error:
             raise StudyExecutionError("failed to compute the data snapshot ID") from error
+        latest_completed_at = max(bar.timestamp_utc for bar in bars.bars) + duration
+        return PreparedStudyRun(
+            request=request,
+            study_id=registered.study_id,
+            version=registered.version,
+            normalized_config=normalized,
+            min_bars=minimum,
+            data_status=DataStatus.VALID,
+            input_bar_count=len(bars.bars),
+            input_source=bars.source,
+            input_window_start_utc=_utc(window_start),
+            input_window_end_utc=_utc(window_end),
+            latest_completed_at_utc=_utc(latest_completed_at),
+            data_snapshot_id=snapshot_id,
+        )
+
+    @staticmethod
+    def _prepare_failure(
+        registered: RegisteredStudy,
+        request: StudyRunRequest,
+        failure: DataFailure,
+    ) -> PreparedStudyRun:
+        report = _validate_failure(request, failure)
+        normalized, minimum = StudyRunner._normalize(registered, request)
+        return PreparedStudyRun(
+            request=request,
+            study_id=registered.study_id,
+            version=registered.version,
+            normalized_config=normalized,
+            min_bars=minimum,
+            data_status=report.status,
+            input_bar_count=None,
+            input_source=None,
+            input_window_start_utc=None,
+            input_window_end_utc=None,
+            latest_completed_at_utc=None,
+            data_snapshot_id=None,
+            data_failure_reasons=report.reasons,
+        )
+
+    def run(self, request: StudyRunRequest, bars: ValidatedBarSet) -> StudyResult:
+        registered = self._resolve(request)
+        if type(bars) is not ValidatedBarSet:
+            raise StudyRequestError("bars must be a ValidatedBarSet")
+        prepared = self._prepare_bars(registered, request, bars)
+        normalized = dict(prepared.normalized_config)
+        minimum = prepared.min_bars
+        snapshot_id = prepared.data_snapshot_id
+        assert snapshot_id is not None
+        assert prepared.input_window_start_utc is not None
+        assert prepared.input_window_end_utc is not None
         inputs_json = canonical_inputs_json(normalized)
         try:
             key = StudyResultKey(
@@ -197,8 +338,8 @@ class StudyRunner:
                 {
                     PROV_CACHE_FORMAT: CACHE_FORMAT_VERSION,
                     PROV_STUDY_VERSION: registered.version,
-                    PROV_WINDOW_START: utc_z(_utc(window_start)),
-                    PROV_WINDOW_END: utc_z(_utc(window_end)),
+                    PROV_WINDOW_START: utc_z(prepared.input_window_start_utc),
+                    PROV_WINDOW_END: utc_z(prepared.input_window_end_utc),
                     PROV_BAR_COUNT: str(len(bars.bars)),
                     PROV_SOURCE: bars.source,
                 }.items()
@@ -310,8 +451,11 @@ class StudyRunner:
 
     def run_data_failure(self, request: StudyRunRequest, failure: DataFailure) -> StudyResult:
         registered = self._resolve(request)
-        report = _validate_failure(request, failure)
-        normalized, _minimum = self._normalize(registered, request)
+        if type(failure) is not DataFailure:
+            raise StudyRequestError("failure must be a DataFailure")
+        prepared = self._prepare_failure(registered, request, failure)
+        report = failure.report
+        normalized = dict(prepared.normalized_config)
         status = StudyStatus(report.status.value)
         evidence = (f"DATA_{report.status.value}", *report.reasons)
         provenance = tuple(
@@ -396,6 +540,7 @@ def _validate_failure(request: StudyRunRequest, failure: DataFailure) -> DataQua
 
 __all__ = [
     "DataFailure",
+    "PreparedStudyRun",
     "StudyResultStore",
     "StudyRunRequest",
     "StudyRunner",

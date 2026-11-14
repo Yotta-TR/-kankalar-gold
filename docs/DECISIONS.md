@@ -137,5 +137,44 @@
   lookup, computation or persistence.
 - **Scope:** `volatility.atr` v0.1.0 supports M1, M5, M15, H1, H4 and D1 as
   independent runs. Coordinating results at a common cutoff, freshness rules,
-  composite snapshots and persisted analysis bundles are future work and are
-  not implemented by this decision.
+  composite snapshots and persisted analysis bundles are covered by later
+  decisions; they are not implemented by this decision.
+
+## ADR-010: Multi-timeframe request contracts and full preflight
+
+- **Decision:** Preserve `StudyRunner` as a single-timeframe component. Add
+  immutable execution/request, freshness-policy, preflight, and aggregate-result
+  contracts in a separate multi-timeframe module. One request may select any
+  non-empty subset of M1, M5, M15, H1, H4 and D1. Every requested timeframe
+  maps to exactly one `ValidatedBarSet` or `DataFailure`; inputs are reused by
+  all executions targeting that timeframe.
+- **Preflight:** A public, non-persisting `StudyRunner.prepare` validates one
+  request/input pair, normalizes configuration, and records the individual
+  snapshot/window. Full preflight checks exact timeframe-key matching, common
+  instrument/cutoff, source identity, supported registrations, normalized
+  duplicate execution identities and freshness before any study execution.
+  Preparation performs no cache lookup, computation or persistence.
+- **Freshness:** The fixed policy `one-timeframe-duration` v1.0.0 records an
+  explicit maximum age for each supported timeframe, exactly equal to that
+  timeframe's duration. Freshness is inclusive at the boundary; there are no
+  automatic weekend or market-closure exemptions. All validated bar sets must
+  have the same source string.
+- **Identity:** The canonical input manifest records the common instrument and
+  UTC cutoff, coordinator and freshness-policy versions/configuration, source,
+  normalized requested executions, component data snapshots/windows, bar ages,
+  and pre-execution eligibility. It excludes final `StudyResult` statuses.
+  SHA-256 input identity is separate from the result identity, which includes
+  canonical final result records and statuses. Existing component snapshots,
+  cache keys, StudyResult and SQLite schema are unchanged.
+- **Canonicalization:** Manifest JSON is UTF-8, sorted-key, compact JSON with
+  non-finite numbers rejected. Timestamps use canonical UTC ISO-8601 with `Z`;
+  durations use integer microseconds. Components sort by supported timeframe
+  order, study ID, version, then canonical normalized-config JSON. Input and
+  result identities use distinct versioned SHA-256 prefixes.
+- **Result contract:** Component results remain individual `StudyResult`s.
+  Aggregate completeness is `COMPLETE`, `PARTIAL`, or
+  `NO_AVAILABLE_COMPONENTS`; no score, probability, direction fusion, or
+  trading recommendation is introduced.
+- **Scope:** This stage implements contracts and complete preflight only. It
+  does not execute component runs, persist aggregate results, change the
+  SQLite schema, or add a cross-timeframe study algorithm.

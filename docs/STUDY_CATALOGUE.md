@@ -72,8 +72,31 @@ Checked against the repository (not assumed):
 | Gap semantics (`data/quality.py`) | Without a caller-supplied `expected_open` session callback, gaps are reported as `GAP_SESSION_UNKNOWN` rather than missing data; weekends/closures are not assumed to be errors. No built-in market calendar exists. |
 | Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row (see ADR-007). Bars, ticks, quotes, instrument specifications, data-quality events and provider-health events are also written source-aware. Schema version 3. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
-| Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. No cross-timeframe coordinator exists yet. |
+| Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. Preflight contracts exist; the coordinator execution loop is not implemented. |
+| Multi-timeframe contracts | `studies/multitimeframe.py` defines requests for explicit non-empty timeframe subsets and validates one tagged `ValidatedBarSet` or `DataFailure` per requested timeframe. Its preflight checks all inputs and normalized executions without running or persisting studies. The eventual execution loop is not implemented. |
+| Runner preparation | `StudyRunner.prepare` validates and normalizes one request/input pair and computes its individual snapshot metadata without cache lookup, computation or persistence. |
 | Not present | No market/session calendar, no macro/COT/futures adapters, no volume-profile or order-book data. |
+
+### 3.1 Multi-timeframe preflight (Stage 1)
+
+- A coordinator request uses one instrument and common normalized UTC cutoff,
+  and may select any non-empty subset of M1, M5, M15, H1, H4 and D1.
+- Each requested timeframe has exactly one tagged input: a validated bar set
+  or an explicit data failure. Multiple executions may reuse that timeframe's
+  input. Source strings must match across all valid bar sets.
+- The fixed `one-timeframe-duration` v1.0.0 freshness policy records the actual
+  maximum age for every supported timeframe. The limit is inclusive and has no
+  automatic weekend or closure exemption. Candle completion time is open time
+  plus timeframe duration.
+- Preflight prepares every single-timeframe request and rejects normalized
+  duplicate execution identities before any component execution or persistence.
+- The canonical input identity excludes final study-result statuses. The
+  separately defined result identity includes final component records/statuses.
+- Canonical manifests use sorted-key compact JSON, canonical UTC timestamps,
+  integer-microsecond ages, deterministic component ordering, and versioned
+  SHA-256 identity prefixes.
+- This stage does not execute component studies, persist an aggregate, or
+  combine evidence into a score, probability, direction, or recommendation.
 
 ## 4. Common conventions
 
