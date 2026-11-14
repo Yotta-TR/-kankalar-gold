@@ -23,6 +23,7 @@ from kankalar_gold_ai.studies.multitimeframe import (
     StudyExecutionSpec,
     preflight_multi_timeframe_analysis,
 )
+from kankalar_gold_ai.studies.multitimeframe_coordinator import MultiTimeframeAnalysisCoordinator
 from kankalar_gold_ai.studies.registry import RegisteredStudy, StudyRegistry
 from kankalar_gold_ai.studies.runner import (
     DataFailure,
@@ -41,6 +42,7 @@ __all__ = [
     "DuplicateStudyError",
     "FreshnessPolicy",
     "InvalidStudyError",
+    "MultiTimeframeAnalysisCoordinator",
     "MultiTimeframeAnalysisRequest",
     "MultiTimeframeAnalysisResult",
     "MultiTimeframePreflight",

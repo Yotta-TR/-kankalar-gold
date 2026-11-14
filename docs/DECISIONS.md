@@ -178,3 +178,23 @@
 - **Scope:** This stage implements contracts and complete preflight only. It
   does not execute component runs, persist aggregate results, change the
   SQLite schema, or add a cross-timeframe study algorithm.
+
+## ADR-011: Multi-timeframe execution coordinator
+
+- **Decision:** `MultiTimeframeAnalysisCoordinator` performs full preflight first,
+  then executes each component in canonical order through the existing
+  single-timeframe runner. Valid fresh inputs, including insufficient warm-up,
+  use `run`; explicit data failures use `run_data_failure`. Stale valid bars
+  become a `STALE` data failure checked at the common cutoff, with reason
+  `FRESHNESS_MAX_AGE_EXCEEDED`, and are never computed. Their original
+  snapshots and ages remain in the preflight manifest.
+- **Persistence:** Individual runner cache and persistence behavior is unchanged.
+  Computation errors become individual `ERROR` results; infrastructure and
+  persistence exceptions propagate. Component persistence is not an all-or-nothing
+  transaction: earlier results may already be stored when a later operation fails.
+  Aggregate manifests and identities are returned, not persisted as a bundle.
+- **Freshness:** `data.quality.TIMEFRAME_DURATIONS` supplies the existing fixed
+  one-duration policy values. Policy version and explicit canonical effective
+  configuration remain unchanged.
+- **Scope:** No aggregation of directional conclusions, scores, probabilities,
+  recommendations, or real order execution is introduced.

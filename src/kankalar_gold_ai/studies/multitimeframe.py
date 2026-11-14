@@ -17,6 +17,7 @@ from kankalar_gold_ai.core.study_results import (
     utc_z,
     validate_study_result,
 )
+from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS
 from kankalar_gold_ai.data.validated import ValidatedBarSet
 from kankalar_gold_ai.studies.base import ConfigValue, validate_config_values
 from kankalar_gold_ai.studies.errors import StudyConfigError, StudyRequestError
@@ -29,14 +30,7 @@ from kankalar_gold_ai.studies.runner import (
 
 SUPPORTED_TIMEFRAMES = ("M1", "M5", "M15", "H1", "H4", "D1")
 _ONE_DURATION_MAX_AGES = MappingProxyType(
-    {
-        "M1": timedelta(minutes=1),
-        "M5": timedelta(minutes=5),
-        "M15": timedelta(minutes=15),
-        "H1": timedelta(hours=1),
-        "H4": timedelta(hours=4),
-        "D1": timedelta(days=1),
-    }
+    {timeframe: TIMEFRAME_DURATIONS[timeframe] for timeframe in SUPPORTED_TIMEFRAMES}
 )
 COORDINATOR_ID = "multitimeframe.analysis"
 COORDINATOR_VERSION = "0.1.0"
@@ -403,7 +397,7 @@ class ComponentResultEnvelope:
 
 @dataclass(frozen=True, slots=True)
 class MultiTimeframeAnalysisResult:
-    """Aggregate result contract; Stage 1 defines identity but does not execute studies."""
+    """Aggregate result with deterministic identity over individual study results."""
 
     preflight: MultiTimeframePreflight
     components: tuple[ComponentResultEnvelope, ...]

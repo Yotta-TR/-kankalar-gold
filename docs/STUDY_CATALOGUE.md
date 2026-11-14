@@ -72,12 +72,12 @@ Checked against the repository (not assumed):
 | Gap semantics (`data/quality.py`) | Without a caller-supplied `expected_open` session callback, gaps are reported as `GAP_SESSION_UNKNOWN` rather than missing data; weekends/closures are not assumed to be errors. No built-in market calendar exists. |
 | Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row (see ADR-007). Bars, ticks, quotes, instrument specifications, data-quality events and provider-health events are also written source-aware. Schema version 3. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
-| Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. Preflight contracts exist; the coordinator execution loop is not implemented. |
-| Multi-timeframe contracts | `studies/multitimeframe.py` defines requests for explicit non-empty timeframe subsets and validates one tagged `ValidatedBarSet` or `DataFailure` per requested timeframe. Its preflight checks all inputs and normalized executions without running or persisting studies. The eventual execution loop is not implemented. |
+| Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. |
+| Multi-timeframe coordination | `studies/multitimeframe.py` defines requests and complete preflight; `studies/multitimeframe_coordinator.py` executes the independent runs in canonical order after preflight. |
 | Runner preparation | `StudyRunner.prepare` validates and normalizes one request/input pair and computes its individual snapshot metadata without cache lookup, computation or persistence. |
 | Not present | No market/session calendar, no macro/COT/futures adapters, no volume-profile or order-book data. |
 
-### 3.1 Multi-timeframe preflight (Stage 1)
+### 3.1 Multi-timeframe coordination
 
 - A coordinator request uses one instrument and common normalized UTC cutoff,
   and may select any non-empty subset of M1, M5, M15, H1, H4 and D1.
@@ -95,8 +95,11 @@ Checked against the repository (not assumed):
 - Canonical manifests use sorted-key compact JSON, canonical UTC timestamps,
   integer-microsecond ages, deterministic component ordering, and versioned
   SHA-256 identity prefixes.
-- This stage does not execute component studies, persist an aggregate, or
-  combine evidence into a score, probability, direction, or recommendation.
+- The coordinator records explicit failures through the runner and converts
+  stale validated input into a `STALE` failure without computing it. Individual
+  results use the runner's cache and persistence; a later persistence failure
+  propagates and does not roll back earlier results. No aggregate is persisted.
+- No evidence is combined into a score, probability, direction, or recommendation.
 
 ## 4. Common conventions
 
@@ -218,7 +221,7 @@ Dependencies are separated into three tiers.
 
 | ID | Item | Status today |
 |---|---|---|
-| F1 | Study Execution Engine (run studies on validated, closed-bar data; emit `StudyResult`) | Implemented as a single-timeframe `StudyRunner` (ADR-007); no multi-timeframe orchestration, scheduling or actual studies |
+| F1 | Study Execution Engine (run studies on validated, closed-bar data; emit `StudyResult`) | Single-timeframe `StudyRunner` and independent multi-timeframe coordinator implemented (ADR-007, ADR-011); scheduling remains open |
 | F2 | Reproducible data-snapshot identity and provenance | Implemented: `compute_bar_snapshot_id` and structured `StudyResult.provenance`; Git/application revision tracking deferred |
 | F3 | Configuration/version handling (study config and version registry) | Implemented: `StudyRegistry`, scalar config validation, explicit study versions |
 | F4 | No-lookahead safeguards (test harness) | Runtime cutoff protections and a reusable test-only point-in-time harness are implemented (ADR-008). Pipeline `end_utc` is an inclusive completion cutoff; provider overreach is rejected, and the runner requires the carrier cutoff to match `as_of_utc`. Raw `retrieve_bars` returns no cutoff provenance; use `retrieve_validated_bars` for studies. |
@@ -335,8 +338,8 @@ The initial selected run configuration uses `atr_period=14`; it is not a
 specification-wide default. Output is descriptive price-unit ATR, without state,
 normalized value, uncertainty, or trade recommendation. `volatility.atr_regime`
 and labels such as `EXPANDING` remain illustrative only. Future horizons and
-any additional supported timeframes beyond the six are unresolved. Coordinated
-multi-timeframe analysis at a common cutoff is future work and is not implemented.
+any additional supported timeframes beyond the six are unresolved. Independent
+multi-timeframe runs can be coordinated at a common cutoff (ADR-011).
 Other volatility studies retain their listed TBDs; fitted models must use only
 data available at `as_of_utc`, and statistical models need a dependency decision
 **[TBD]**.
@@ -467,7 +470,7 @@ FOUNDATION → BASELINE → STRUCTURE → DATA_DEPENDENT → ADVANCED.
 
 ## 13. Unresolved research/design decisions
 
-1. Partly resolved (ADR-007): single-timeframe engine, registry and configuration versioning exist (F1, F3). Open: multi-timeframe orchestration and scheduling.
+1. Partly resolved (ADR-007, ADR-011): single-timeframe engine, independent multi-timeframe coordination, registry and configuration versioning exist (F1, F3). Open: scheduling.
 2. Partly resolved (ADR-007): snapshot ID generation and structured provenance exist (F2). Open: Git/application revision tracking.
 3. Session/market calendar and the policy for staleness during closures (C1, for session-dependent studies).
 4. Partly resolved (ADR-007): `DataStatus` → `StudyStatus` mapping exists for caller-supplied `DataFailure`. The pipeline cutoff is bound to the runner cutoff (ADR-008). Open: automatic pipeline-to-runner failure wiring.
