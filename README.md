@@ -73,7 +73,7 @@ before adding any broker or messaging integration.
 
 ## Next phase
 
-Phase 1B.3 (single-timeframe `StudyRunner`, append-only snapshot-keyed result cache, SQLite schema v3) and the F4 no-lookahead harness are implemented. The pipeline's inclusive bar-completion `end_utc` is bound to the runner's `as_of_utc`, and provider overreach is rejected (ADR-008). Use `retrieve_validated_bars` for studies; `retrieve_bars` returns a raw tuple without cutoff provenance. `volatility.atr`, `trend.ma_slope_order`, and independent multi-timeframe coordination are implemented for research. Strategies and runner scheduling remain unimplemented.
+Phase 1B.3 (single-timeframe `StudyRunner`, append-only snapshot-keyed result cache, SQLite schema v3) and the F4 no-lookahead harness are implemented. The pipeline's inclusive bar-completion `end_utc` is bound to the runner's `as_of_utc`, and provider overreach is rejected (ADR-008). Use `retrieve_validated_bars` for studies; `retrieve_bars` returns a raw tuple without cutoff provenance. `volatility.atr`, `trend.ma_slope_order`, `trend.adx_dm`, and independent multi-timeframe coordination are implemented for research. Strategies and runner scheduling remain unimplemented.
 The adapter has only been tested with fakes, not against a real terminal. The
 official MT5 `initialize()` may launch the terminal and use its last saved
 account; do not call it until a separate read-only environment and terminal

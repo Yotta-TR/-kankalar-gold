@@ -1,8 +1,9 @@
 # Study Catalogue
 
-Status: This catalogue documents research candidates. `volatility.atr` and
-`trend.ma_slope_order` are implemented as descriptive studies; listing or
-implementation does not imply predictive approval or ensemble activation.
+Status: This catalogue documents research candidates. `volatility.atr`,
+`trend.ma_slope_order`, and `trend.adx_dm` are implemented as descriptive
+studies; listing or implementation does not imply predictive approval or
+ensemble activation.
 This catalogue organizes the research candidates of Sections 5.1–5.6 of
 [`KANKALAR_GOLD_AI_MASTER_SPEC_v0.1.md`](../KANKALAR_GOLD_AI_MASTER_SPEC_v0.1.md)
 (the "master spec", which remains canonical) into implementable specification
@@ -260,14 +261,14 @@ are correlated with each other and must be grouped (§2).
 | ID | Candidate | Spec definition | Parameters (spec-supported) | Output/states |
 |---|---|---|---|---|
 | `trend.ma_slope_order` | SMA slope and ordering | Descriptive fast/middle/slow SMA ordering and fast-SMA slope | v0.1.0 uses explicit periods, lookback and flat threshold; no defaults | Nine ordering/slope states; jointly aligned up/down gives `BULLISH`/`BEARISH`, otherwise `NEUTRAL` |
-| `trend.adx_dm` | ADX and directional movement | Named only | Period **[TBD]** | Trend strength and directional movement **[TBD]**; formula not defined in spec |
+| `trend.adx_dm` | ADX and directional movement | Named only; formula and period remain unspecified in the master spec | v0.1.0 requires explicit `adx_period >= 2`; no default | ADX plus DI dominance; see §6.2 |
 | `trend.rsi` | RSI level, slope, regime-aware interpretation | Level and slope; interpretation depends on regime | Period/levels **[TBD]** | Level/slope; regime dependence implies a link to Group 4 **[TBD]** |
 | `trend.macd` | MACD | Level, signal relationship, histogram change, zero-line context | Fast/slow/signal **[TBD]** | Components above; states **[TBD]** |
 | `trend.roc_momentum` | Rate of Change / momentum | Over multiple horizons | Horizons **[TBD]** | Per-horizon values; `inputs` is flat so horizons are encoded as scalar keys **[SUGGESTION]** |
 | `trend.donchian` | Donchian channel position and breakout state | Position within channel; breakout state | Lookback **[TBD]**; whether the current forming bar is excluded must follow closed-bar rule | Position, breakout state **[TBD]** |
 | `trend.atr_trend` | Supertrend or other ATR-based trend descriptors | "As candidates, not assumed superior" | ATR period/multiplier **[TBD]** | State **[TBD]**; repainting-prone indicators need explicit tests |
 
-For the other six entries, warm-up is **[TBD]** (must emit
+For entries that remain unimplemented, warm-up is **[TBD]** (must emit
 `INSUFFICIENT_DATA` before it is met); data-quality dependency: `VALID` bars
 for the full lookback; specific tests: warm-up boundary, closed-bar only,
 missing bar behavior, no-lookahead; out-of-sample: §4.6, metric **[TBD]**.
@@ -312,6 +313,62 @@ predictive contribution. `trend.atr_trend` additionally depends on the ATR study
   evaluated, not assumed independent. Synthetic tests cover numerical examples,
   all states, boundaries, configuration, warm-up, numerical failures, data
   quality, no-lookahead, all timeframes, caching and SQLite persistence.
+
+### 6.2 `trend.adx_dm` v0.1.0
+
+- **Canonical boundary:** The master specification names ADX and directional
+  movement but does not define the formula, period, zero-denominator behavior,
+  or outputs. The choices below are implementation decisions, not additions to
+  the canonical specification.
+- **Configuration and warm-up:** Exactly one required field,
+  `adx_period`, is a built-in integer of at least 2; booleans, floats, missing
+  values, and unknown keys are rejected. There is no implicit default or
+  maximum. The first ADX is computable at bar index `2 * adx_period - 1`,
+  requiring `2 * adx_period` bars. This is a first-computable-output boundary,
+  not a convergence or stability guarantee.
+- **Formula:** For each adjacent supplied pair, +DM is the positive high
+  increase only when it strictly exceeds the downward low move; -DM is the
+  positive low decrease only when it strictly exceeds the upward high move.
+  Equal positive moves yield zero for both. True Range is the maximum of
+  current high-low and the absolute current-high/low to previous-close gaps.
+  The first supplied bar contributes no observation. The first `N` DM and TR
+  observations are summed with `math.fsum`; later sums use Wilder's
+  `S = S - S/N + current` recurrence. DI is `100 * (smoothed_DM / smoothed_TR)`.
+  DX is `100 * abs((+DI - -DI) / (+DI + -DI))`, evaluated equivalently from
+  scaled DM sums for numerical stability. The first ADX is the mean of the
+  first `N` DX values using `math.fsum`; subsequent ADX uses
+  `(previous_ADX * (N - 1) + current_DX) / N`. No historical integer rounding
+  is applied.
+- **Zero policy:** Exact zero smoothed TR with zero DM defines both DIs and DX
+  as zero. Positive TR with both DM sums zero also defines both DIs and DX as
+  zero; each zero DX participates in ADX seeding and recurrence. ADX decays
+  when its computed DX is zero; zero raw DM alone does not force zero DX because
+  residual one-sided smoothed DM can preserve DI dominance. Zero TR with
+  non-zero DM is an arithmetic invariant failure. No epsilon is used. This
+  policy is explicit project behavior and is not exact TA-Lib parity, whose
+  zero handling differs.
+- **Outputs:** `value` is ADX in `[0, 100]`. `normalized_value` is scaled
+  signed DI dominance in `[-1, 1]`, or `None` when both DM sums are zero.
+  `state` is `PLUS_DI_DOMINANT`, `MINUS_DI_DOMINANT`, or `DI_BALANCED`;
+  direction is respectively `BULLISH`, `BEARISH`, or `NEUTRAL`, based only on
+  the smoothed DM comparison. Evidence includes latest ADX, both DIs, DX,
+  period, and zero-denominator case with stable numeric formatting. Evidence is
+  for human audit, not a substitute for first-class numeric fields; the shared
+  result contract has no dedicated +DI and -DI values.
+- **Execution and limits:** Supports independent M1, M5, M15, H1, H4, and D1
+  runs over validated completed OHLC bars. Adjacent supplied bars define
+  observations; accepted closure gaps are not filled with synthetic bars.
+  Positive subnormal arithmetic is allowed when finite. Non-finite arithmetic,
+  overflow, or violated mathematical bounds follow the runner's `ERROR` path
+  with the input snapshot. This is a lagging, parameter-sensitive description,
+  not a prediction, strength-threshold classification, or trading
+  recommendation. It uses no volume, external data, or live connection and is
+  correlated with MA slope/order and ATR-related range information.
+- **Tests:** Synthetic tests cover hand-calculated DI/ADX values, DM selection,
+  Wilder initialization and recurrence, exact warm-up, zero cases, numerical
+  boundaries, all timeframes, closure and unknown gaps, F4 future-mutation
+  independence, cache/SQLite behavior, coordinator stale and explicit failures,
+  and non-available result fields.
 
 ## 7. Group 2 — Market structure and price action [SPEC §5.2]
 

@@ -217,3 +217,36 @@
   path. A neutral state does not assert a sideways market.
 - **Scope:** This is not a forecast, trading recommendation or probability.
   No cross-timeframe combination, external data, or ATR dependency is added.
+
+## ADR-013: Wilder DMI/ADX descriptive study
+
+- **Decision:** Implement `trend.adx_dm` v0.1.0 as independent single-timeframe
+  runs on M1, M5, M15, H1, H4 and D1. The master specification names ADX and
+  directional movement but leaves the formula and period unresolved; this ADR
+  records implementation choices rather than changing the canonical spec.
+- **Configuration and indexing:** Require exactly one explicit
+  `adx_period`, a built-in integer of at least 2, excluding booleans; use no
+  default or maximum. Omit the first supplied bar's DM/TR observation, seed
+  Wilder-smoothed sums from the next N observations, seed ADX from the first N
+  DX values, and require `2 * adx_period` bars for the first output at index
+  `2 * adx_period - 1`. Process every supplied observation; minimum warm-up is
+  not a convergence guarantee.
+- **Zero policy:** Exact zero smoothed TR with zero DM yields zero DIs and DX;
+  positive TR with both DM sums zero also yields zero DIs and DX. Include zero
+  DX in ADX initialization and recurrence. ADX decays when computed DX is zero;
+  zero raw DM alone does not force zero DX, since residual one-sided smoothed DM
+  can preserve dominance. Zero TR with non-zero DM is an arithmetic invariant
+  error. No epsilon/tolerance is used. This differs from TA-Lib zero handling
+  and is intentional project behavior.
+- **Numerics and output:** Compute signed normalized DI dominance from scaled
+  smoothed DM sums, not from already divided DIs, so subnormal DI underflow
+  does not erase dominance. Reject non-finite arithmetic or values outside
+  mathematical bounds through the runner's snapshot-bound `ERROR` path; do
+  not clamp. `StudyOutput` remains unchanged: `value` is ADX,
+  `normalized_value` is dominance or `None` when both DMs are zero, state and
+  direction represent DI dominance, and evidence carries formatted latest
+  +DI/-DI for human audit. Separate first-class DI fields require a future
+  shared-contract decision.
+- **Scope:** OHLC only; no volume, threshold, default period, cross-timeframe
+  fusion, prediction, or trading recommendation is introduced. Existing
+  runner, coordinator, cache, persistence, and SQLite schema remain unchanged.
