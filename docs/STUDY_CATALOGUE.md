@@ -1,7 +1,8 @@
 # Study Catalogue
 
 Status: This catalogue documents research candidates. `volatility.atr`,
-`trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, and `trend.roc_momentum`
+`trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, `trend.roc_momentum`,
+`trend.macd`, and `trend.donchian`
 are implemented as descriptive studies; listing or implementation does not imply predictive approval or
 ensemble activation.
 This catalogue organizes the research candidates of Sections 5.1–5.6 of
@@ -300,9 +301,9 @@ are correlated with each other and must be grouped (§2).
 | `trend.ma_slope_order` | SMA slope and ordering | Descriptive fast/middle/slow SMA ordering and fast-SMA slope | v0.1.0 uses explicit periods, lookback and flat threshold; no defaults | Nine ordering/slope states; jointly aligned up/down gives `BULLISH`/`BEARISH`, otherwise `NEUTRAL` |
 | `trend.adx_dm` | ADX and directional movement | Named only; formula and period remain unspecified in the master spec | v0.1.0 requires explicit `adx_period >= 2`; no default | ADX plus DI dominance; see §6.2 |
 | `trend.rsi` | RSI level and slope | Level and slope; regime interpretation requires Group 4 | v0.1.0 requires explicit `rsi_period >= 2` | RSI level and one-bar movement; no regime interpretation |
-| `trend.macd` | MACD | Level, signal relationship, histogram change, zero-line context | Fast/slow/signal **[TBD]** | Components above; states **[TBD]** |
+| `trend.macd` | MACD | Level, signal relationship, histogram change, zero-line context | v0.1.0 requires explicit fast, slow and signal periods; no defaults | Histogram sign and audit evidence; see below |
 | `trend.roc_momentum` | Rate of Change / momentum | Over multiple horizons | v0.1.0 requires explicit `roc_period >= 1` | Percentage ROC for one horizon per execution |
-| `trend.donchian` | Donchian channel position and breakout state | Position within channel; breakout state | Lookback **[TBD]**; whether the current forming bar is excluded must follow closed-bar rule | Position, breakout state **[TBD]** |
+| `trend.donchian` | Donchian channel position and breakout state | Position within channel; breakout state | v0.1.0 requires explicit `donchian_period`; no default | Prior-channel position and strict close breakout; see below |
 | `trend.atr_trend` | Supertrend or other ATR-based trend descriptors | "As candidates, not assumed superior" | ATR period/multiplier **[TBD]** | State **[TBD]**; repainting-prone indicators need explicit tests |
 
 For entries that remain unimplemented, warm-up is **[TBD]** (must emit
@@ -340,6 +341,48 @@ predictive contribution. `trend.atr_trend` additionally depends on the ATR study
   These are descriptive studies, not validated trading strategies. No 30/70
   classification, regime-aware interpretation, prediction or performance claim
   is made.
+
+### MACD and Donchian v0.1.0
+
+- Both run independently on M1, M5, M15, H1, H4 and D1 using validated
+  completed bars via the runner and pipeline bridge. Accepted session gaps
+  count as adjacent observations. Their exact version, explicit configuration,
+  timeframe and bar snapshot participate in cache identity. No defaults are
+  chosen. These are descriptive research components, not predictions, market
+  regimes, execution signals or approved strategies; `NO_TRADE` remains valid.
+- MACD requires exactly positive built-in integer `fast_period`, `slow_period`
+  and `signal_period`, with fast strictly less than slow. Each close EMA is
+  seeded by the arithmetic mean of its first `n` values and then updated as
+  `previous + 2/(n+1) * (current - previous)`. Starting when the slow EMA is
+  available, MACD is fast minus slow. The signal is an EMA of the MACD series,
+  seeded by the first `signal_period` MACD values. Histogram is MACD minus
+  signal. At least `slow_period + signal_period` bars are needed for the
+  current and immediately preceding histogram.
+- MACD `value` is the current histogram; `normalized_value` is `None`. Strict
+  positive/negative/exact zero gives `HISTOGRAM_POSITIVE`/`HISTOGRAM_NEGATIVE`/
+  `HISTOGRAM_ZERO` and `BULLISH`/`BEARISH`/`NEUTRAL` respectively. Evidence
+  records all periods, current MACD line, signal line, current and previous
+  histogram, their difference, and the MACD line's positive/negative/zero
+  relation to zero. Numeric evidence uses round-trip-safe representations.
+  The seed depends on supplied history and warm-up does not establish
+  convergence. Only the histogram is a structured scalar database value;
+  other components are evidence strings, not separate database columns.
+- Donchian requires exactly a positive built-in integer `donchian_period` and
+  at least `period + 1` bars. Its upper/lower channel is the maximum high and
+  minimum low of `bars[-period-1:-1]`: the current completed bar is excluded.
+  The decision price is the current close, not its wick. Position is
+  `(close - lower)/(upper - lower)` and is **not clipped**; values outside
+  [0, 1] are possible. Width zero gives `value=None`.
+- A close strictly above/below the channel gives `BREAKOUT_UP`/`BREAKOUT_DOWN`
+  and `BULLISH`/`BEARISH`, including for zero-width channels. Otherwise
+  direction is `NEUTRAL`: boundary equality gives `INSIDE_CHANNEL` for
+  nonzero width and `ZERO_WIDTH_CHANNEL` for zero width. `normalized_value`
+  is `None`. Evidence records the period, upper and lower bounds, width, close
+  and strict-comparison outcome.
+- Used prices must be finite and positive; non-finite arithmetic or overflow
+  fails closed as a persisted runner `ERROR` without numerical values. Floating
+  point calculations use exact comparisons without implicit tolerances; their
+  precision and potential overflow remain limitations.
 
 ### 6.1 `trend.ma_slope_order` v0.1.0
 
