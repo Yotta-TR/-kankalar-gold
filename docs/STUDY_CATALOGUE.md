@@ -1,8 +1,8 @@
 # Study Catalogue
 
 Status: This catalogue documents research candidates. `volatility.atr`,
-`trend.ma_slope_order`, and `trend.adx_dm` are implemented as descriptive
-studies; listing or implementation does not imply predictive approval or
+`trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, and `trend.roc_momentum`
+are implemented as descriptive studies; listing or implementation does not imply predictive approval or
 ensemble activation.
 This catalogue organizes the research candidates of Sections 5.1–5.6 of
 [`KANKALAR_GOLD_AI_MASTER_SPEC_v0.1.md`](../KANKALAR_GOLD_AI_MASTER_SPEC_v0.1.md)
@@ -299,9 +299,9 @@ are correlated with each other and must be grouped (§2).
 |---|---|---|---|---|
 | `trend.ma_slope_order` | SMA slope and ordering | Descriptive fast/middle/slow SMA ordering and fast-SMA slope | v0.1.0 uses explicit periods, lookback and flat threshold; no defaults | Nine ordering/slope states; jointly aligned up/down gives `BULLISH`/`BEARISH`, otherwise `NEUTRAL` |
 | `trend.adx_dm` | ADX and directional movement | Named only; formula and period remain unspecified in the master spec | v0.1.0 requires explicit `adx_period >= 2`; no default | ADX plus DI dominance; see §6.2 |
-| `trend.rsi` | RSI level, slope, regime-aware interpretation | Level and slope; interpretation depends on regime | Period/levels **[TBD]** | Level/slope; regime dependence implies a link to Group 4 **[TBD]** |
+| `trend.rsi` | RSI level and slope | Level and slope; regime interpretation requires Group 4 | v0.1.0 requires explicit `rsi_period >= 2` | RSI level and one-bar movement; no regime interpretation |
 | `trend.macd` | MACD | Level, signal relationship, histogram change, zero-line context | Fast/slow/signal **[TBD]** | Components above; states **[TBD]** |
-| `trend.roc_momentum` | Rate of Change / momentum | Over multiple horizons | Horizons **[TBD]** | Per-horizon values; `inputs` is flat so horizons are encoded as scalar keys **[SUGGESTION]** |
+| `trend.roc_momentum` | Rate of Change / momentum | Over multiple horizons | v0.1.0 requires explicit `roc_period >= 1` | Percentage ROC for one horizon per execution |
 | `trend.donchian` | Donchian channel position and breakout state | Position within channel; breakout state | Lookback **[TBD]**; whether the current forming bar is excluded must follow closed-bar rule | Position, breakout state **[TBD]** |
 | `trend.atr_trend` | Supertrend or other ATR-based trend descriptors | "As candidates, not assumed superior" | ATR period/multiplier **[TBD]** | State **[TBD]**; repainting-prone indicators need explicit tests |
 
@@ -313,6 +313,33 @@ Prerequisites: core F1–F5 only; no session calendar (C1) is required. D1/D2
 apply only before combining results as decision evidence or claiming
 predictive contribution. `trend.atr_trend` additionally depends on the ATR study
 `volatility.atr` (§8).
+
+### RSI and ROC v0.1.0
+
+- Both studies run independently on M1, M5, M15, H1, H4 and D1 through
+  `StudyRunner` with validated completed bars. Adjacent supplied bars count as
+  adjacent observations, including across accepted session closures. Snapshot,
+  configuration, version and timeframe participate in cache identity.
+- RSI requires exactly one built-in integer `rsi_period >= 2`, with no default.
+  From close-to-close changes, positive changes are gains and negative changes
+  are losses. The arithmetic mean of the first period of gains/losses seeds
+  Wilder averages; each following average is `(previous * (period - 1) +
+  current) / period`. RSI is `100 - 100 / (1 + average_gain / average_loss)`;
+  both averages zero gives 50, zero loss gives 100, and zero gain gives 0.
+  Computation uses an equivalent scaled ratio. At least `period + 2` bars are
+  required for the current and previous completed RSI. `value` is current RSI;
+  `normalized_value` is `(current - previous) / 100`. Rising, falling and flat
+  states map to bullish, bearish and neutral **RSI movement**, respectively.
+  The seed depends on the supplied history; warm-up does not establish convergence.
+- ROC requires exactly one positive built-in integer `roc_period`, with no
+  default. At least `period + 1` bars are required. `value` is
+  `100 * (close[t] / close[t - period] - 1)`; positive, negative and zero states
+  map to bullish, bearish and neutral descriptive momentum. `normalized_value`
+  is `None`. Each horizon requires a separate configuration and cache entry.
+- Missing data is not zero; invalid data and non-finite arithmetic fail closed.
+  These are descriptive studies, not validated trading strategies. No 30/70
+  classification, regime-aware interpretation, prediction or performance claim
+  is made.
 
 ### 6.1 `trend.ma_slope_order` v0.1.0
 
