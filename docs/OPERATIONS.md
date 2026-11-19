@@ -27,7 +27,7 @@ errors are persisted as non-computing study results with status and stable
 source/reason evidence. Invalid requests and unclassified exceptions still
 raise. The helper is an offline integration seam; it does not initialize MT5.
 
-SQLite migrations through schema v8 are transactional. Schema v4 upgrades
+SQLite migrations through schema v9 are transactional. Schema v4 upgrades
 quote/tick event identity, schema v5 adds append-only study events and result
 observations, schema v6 indexes the calendar-context cache identity, and schema
 v7 blocks `INSERT OR REPLACE` on matching study-event identities or
@@ -38,6 +38,20 @@ events are rejected, while distinct updates sharing a timestamp are retained in
 insertion order. Persistence APIs are insert-only; triggers guard updates,
 deletes, and replacements on study-event tables, but do not prevent arbitrary
 direct edits to other database tables.
+
+Schema v9 adds separate append-only structure-zone records and result
+observations, guarded against update, delete and replacement (including explicit
+rowid collisions). Back up the database before migration; failure rolls back
+the whole migration transaction. Zone membership and configuration form part
+of each identity, so later observations never overwrite earlier zones.
+
+Register `SupportResistanceZonesStudy` with `StudyRegistry`; supply positive
+`left_bars`, `right_bars`, `lookback_bars` and `tolerance_bps` explicitly.
+The lookback counts the latest completed bars by pivot position, and swing
+detection may use earlier bars outside that window. Provide at least the
+lookback count and the swing warm-up. Retain the same history start and calendar
+context for reproducibility. Volume-based strength is unavailable and
+unimplemented; no zone is a signal or trading recommendation.
 
 Register `BosChochStudy` with `StudyRegistry` and use `StudyRunner` or
 `run_pipeline_study` with explicit positive `left_bars` and `right_bars`.

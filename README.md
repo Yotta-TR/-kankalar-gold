@@ -6,7 +6,7 @@ gold research. No trading logic or order execution is implemented.
 Phase 1A completes market-data contracts, offline quality checks, injectable
 read-only MT5 adapter, configuration-based provider selection, historical
 coverage validation, and an append-oriented versioned SQLite persistence layer
-(schema v8).
+(schema v9).
 Comprehensive testing with deterministic synthetic data verifies all components.
 This is research-only software; do not use for live market analysis.
 
@@ -90,7 +90,8 @@ studies; `retrieve_bars` returns a raw tuple without cutoff provenance.
 `run_pipeline_study` connects retrieval and study execution, mapping typed data
 and provider failures to persisted non-computing study results. The
 `volatility.atr`, `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, and
-`trend.roc_momentum`, `trend.macd`, `trend.donchian`, `structure.swings`, and `structure.bos_choch`
+`trend.roc_momentum`, `trend.macd`, `trend.donchian`, `structure.swings`,
+`structure.bos_choch`, and `structure.sr_zones`
 studies and independent multi-timeframe coordination are
 descriptive research tools, not validated trading strategies. RSI describes
 its own movement, not a market regime; each ROC run uses one explicit horizon.
@@ -115,6 +116,12 @@ strengthens replacement guards against explicit rowid collisions. The initial
 bias depends on the beginning of the supplied history; keep the history window
 consistent for replay. These events are descriptive and have no predictive or
 trading approval.
+`structure.sr_zones` v0.1.0 uses explicit swing windows, pivot lookback and
+price tolerance to group confirmed lows into support and highs into resistance.
+Each zone requires at least two swings; its full price range must fit the
+tolerance measured from its lowest member. Schema v9 stores immutable zone
+records and observations. A membership change produces a new identity.
+Volume-based strength is unavailable and unimplemented; zones are descriptive.
 Strategies and runner scheduling remain unimplemented.
 
 The MT5 adapter has bounded connection/history retries and a timeout for

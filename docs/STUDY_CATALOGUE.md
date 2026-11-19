@@ -2,7 +2,8 @@
 
 Status: This catalogue documents research candidates. `volatility.atr`,
 `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, `trend.roc_momentum`,
-`trend.macd`, `trend.donchian`, `structure.swings`, and `structure.bos_choch`
+`trend.macd`, `trend.donchian`, `structure.swings`, `structure.bos_choch`, and
+`structure.sr_zones`
 are implemented as descriptive studies; listing or implementation does not imply predictive approval or
 ensemble activation.
 This catalogue organizes the research candidates of Sections 5.1–5.6 of
@@ -74,7 +75,7 @@ Checked against the repository (not assumed):
 | Quotes and ticks | `validate_quote` reports non-finite/crossed/non-positive bid/ask, future or stale timestamps, inconsistent milliseconds, invalid last, and excessive spread. The MT5 adapter validates tick timestamp/range, finite and non-negative price values, bid/ask ordering, flags, changed-field consistency, exact duplicate records, and out-of-order events; distinct updates sharing a timestamp are preserved. Empty tick history has a typed missing-data error. Quotes and ticks still do not pass through a shared `ValidatedQuote`/`ValidatedTick` study pipeline; quote freshness/spread thresholds must be explicitly checked by the caller **[TBD]**. |
 | Instrument | The logical project identity is `GOLD_USD` [SPEC §19]; the broker symbol is `null` until discovered and confirmed from MT5 [SPEC §19]. It is commonly labelled XAUUSD, but the exact symbol is unresolved. |
 | Gap semantics (`data/calendar.py`, `data/quality.py`) | Gaps are classified with an explicit broker/instrument calendar. Known closures are retained as valid-quality diagnostics, open-session missing bars and unknown calendar coverage fail closed. The typed calendar contract has no broker schedule or timezone defaults; all calendar tests use synthetic schedules. |
-| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON. Schema v3 adds provenance; v4 rebuilds quote/tick identities; v5 adds immutable swing events and observations; v6 adds calendar-context cache identity; v7 blocks identity-based replacement; v8 adds structure-break events and observations and rowid replacement guards. `find_cached_study_result` validates the newest eligible row using the full cache key. Migrations and each write batch are transactional. Current schema version 8. |
+| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON. Schema v3 adds provenance; v4 rebuilds quote/tick identities; v5 adds immutable swing events and observations; v6 adds calendar-context cache identity; v7 blocks identity-based replacement; v8 adds structure-break events and observations and rowid replacement guards; v9 adds immutable zones and observations. `find_cached_study_result` validates the newest eligible row using the full cache key. Migrations and each write batch are transactional. Current schema version 9. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
 | Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. |
 | Pipeline failure integration | `studies.pipeline_execution.run_pipeline_study` runs only validated bars; known quality, empty-history, and typed provider failures become persisted non-computing `StudyResult`s with status/reason/source evidence. Other request/programming errors still propagate. |
@@ -481,8 +482,8 @@ predictive contribution. `trend.atr_trend` additionally depends on the ATR study
 
 Common to the group: priority **STRUCTURE**; input: closed OHLC bars (verified broker gold instrument; exact symbol to be
 discovered via MT5); the spec requires every concept to have *an operational definition, a
-detection algorithm, and out-of-sample results* [SPEC §5.2]. `structure.swings`
-and `structure.bos_choch` are defined below; other unimplemented rules remain **[TBD]**.
+detection algorithm, and out-of-sample results* [SPEC §5.2]. `structure.swings`,
+`structure.bos_choch` and `structure.sr_zones` are defined below; other unimplemented rules remain **[TBD]**.
 Type: *descriptive/contextual*. Principal risks: repainting (swings are only known after
 confirmation), subjective definitions, session-boundary ambiguity, and
 session/calendar dependence (C1, only for session-dependent studies).
@@ -491,7 +492,7 @@ session/calendar dependence (C1, only for session-dependent studies).
 |---|---|---|---|
 | `structure.swings` | Confirmed swing highs/lows | Strict unique high/low against explicit left/right windows | Implemented as v0.1.0; see below. Other structure studies remain **[TBD]** |
 | `structure.bos_choch` | Break of Structure (BOS) and Change of Character (CHoCH) | "with exact event rules" | Implemented as v0.1.0; depends on `structure.swings` |
-| `structure.sr_zones` | Support/resistance zones | "based on repeatable swing/volume criteria" | Zone construction, width, volume use **[TBD]**; volume only if its meaning is characterized (§10) |
+| `structure.sr_zones` | Support/resistance zones | "based on repeatable swing/volume criteria" | Implemented as v0.1.0 below; volume-based strength is unavailable and unimplemented |
 | `structure.range_failed_breakout` | Range boundaries and failed breakouts | Named only | Range and failure definitions **[TBD]** |
 | `structure.session_levels` | Opening range and session highs/lows | Named only | Session definitions, time zones, DST **[TBD]**; needs C1 |
 | `structure.gaps_fvg` | Gap and imbalance descriptors, including Fair Value Gap candidates | "with precise candle definitions" | Candle definition **[TBD]**; gaps must not be confused with weekend/closure data absence |
@@ -506,6 +507,35 @@ boundary candles, equal-level tolerance edge cases, missing bars,
 no-lookahead; out-of-sample: §4.6. Prerequisites: core F1–F5; C1 only for
 `structure.session_levels` (and any other session-dependent definition adopted
 later); BOS/CHoCH and zones depend on swings; D1/D2 as in §5.1 tier C.
+
+### `structure.sr_zones` v0.1.0
+
+- Requires explicit positive integer `left_bars`, `right_bars` and
+  `lookback_bars`, and finite positive numeric `tolerance_bps`. Minimum bars:
+  the greater of lookback and swing warm-up. The lookback contains the latest
+  completed bars, selecting swings by pivot position; their detection can use
+  earlier history for left-hand context. Only swings known by the cutoff are eligible.
+- Confirmed lows and highs are clustered independently into support and
+  resistance. Sort by price then event ID; anchor each cluster at its lowest
+  price. Add a member only if `(price - anchor) * 10000 <= anchor *
+  tolerance_bps`, using decimal representations of input numbers. Otherwise,
+  start the next cluster. Singletons are discarded; transitive chaining is not
+  allowed. Each immutable zone records ordered swing IDs and prices, minimum
+  and maximum prices and the latest member confirmation time.
+- Identity includes membership, member prices, cutoff-independent confirmation
+  time, study and market identity, lookback, tolerance and calendar context.
+  Changed membership creates a new zone; schema v9 persists zone records and
+  result observations transactionally and restores them on cache hits.
+  Input history may change which pivots can be confirmed. Volume does not
+  influence construction or ranking; volume-based strength is unavailable and
+  unimplemented. No rank, predictive score, signal or recommendation is emitted.
+- **Remaining structural TBDs:** alternate swing tie/prominence and
+  parameter-selection rules; alternate break/consumption and bias initialization
+  rules; zone merging, lifecycle, touches, invalidation, widths, strength,
+  volume semantics and ranking; range/failed-breakout definitions; session
+  ranges and calendars; FVG/gap candles; equal-level/sweep criteria; and
+  independently specified candlestick patterns. Out-of-sample validation is
+  also TBD for all structural studies.
 
 ### `structure.swings` v0.1.0
 

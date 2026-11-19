@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from kankalar_gold_ai.core.contracts import (
     Direction,
     StructureBreakEvent,
+    StructureZone,
     StudyEvent,
     StudyResult,
     StudyStatus,
@@ -272,7 +273,10 @@ def validate_study_result(result: StudyResult) -> None:
         )
     _require(
         type(result.events) is tuple
-        and all(type(event) in (StudyEvent, StructureBreakEvent) for event in result.events),
+        and all(
+            type(event) in (StudyEvent, StructureBreakEvent, StructureZone)
+            for event in result.events
+        ),
         "events must be a tuple of study event values",
     )
     event_ids: set[str] = set()
@@ -289,10 +293,16 @@ def validate_study_result(result: StudyResult) -> None:
         _require(result.status is StudyStatus.AVAILABLE, "events require an AVAILABLE result")
         context_id = provenance_mapping(result.provenance).get(PROV_CALENDAR_CONTEXT_ID)
         for event in result.events:
-            if isinstance(event, StructureBreakEvent):
+            if isinstance(event, (StructureBreakEvent, StructureZone)):
                 _require(
                     event.calendar_context_id == context_id,
-                    "structure break calendar context must match its parent result",
+                    "structure event calendar context must match its parent result",
+                )
+            if isinstance(event, StructureZone):
+                _require(
+                    result.inputs.get("lookback_bars") == event.lookback_bars
+                    and result.inputs.get("tolerance_bps") == event.tolerance_bps,
+                    "structure zone configuration must match its parent result",
                 )
 
     if result.status is StudyStatus.AVAILABLE:

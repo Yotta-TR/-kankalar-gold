@@ -18,6 +18,8 @@ from kankalar_gold_ai.core.contracts import (
     SignalLifecycleEvent,
     StructureBreakEvent,
     StructureBreakType,
+    StructureZone,
+    StructureZoneType,
     StudyEvent,
     StudyEventConflictError,
     StudyEventType,
@@ -64,6 +66,12 @@ _BREAK_EVENT_COLUMNS = (
 _BREAK_EVENT_SELECT_COLUMNS = ", ".join(
     f"e.{column}" for column in _BREAK_EVENT_COLUMNS.split(", ")
 )
+_ZONE_COLUMNS = (
+    "event_id, study_id, version, instrument, timeframe, zone_type, member_ids_json, "
+    "member_prices_json, lower_price, upper_price, known_at_utc, lookback_bars, "
+    "tolerance_bps, calendar_context_id"
+)
+_ZONE_SELECT_COLUMNS = ", ".join(f"e.{column}" for column in _ZONE_COLUMNS.split(", "))
 
 
 def _reject_constant(name: str) -> object:
@@ -73,7 +81,7 @@ def _reject_constant(name: str) -> object:
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 8
+    SCHEMA_VERSION = 9
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -142,6 +150,7 @@ class SQLitePersistence:
                     6: self._migrate_to_version_6,
                     7: self._migrate_to_version_7,
                     8: self._migrate_to_version_8,
+                    9: self._migrate_to_version_9,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -463,6 +472,46 @@ class SQLitePersistence:
                 BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
             )
 
+    def _migrate_to_version_9(self, connection: sqlite3.Connection) -> None:
+        """Add immutable structure zones and their result observations."""
+        connection.execute(
+            """CREATE TABLE structure_zones (
+                event_id TEXT NOT NULL PRIMARY KEY,
+                study_id TEXT NOT NULL, version TEXT NOT NULL,
+                instrument TEXT NOT NULL, timeframe TEXT NOT NULL,
+                zone_type TEXT NOT NULL, member_ids_json TEXT NOT NULL,
+                member_prices_json TEXT NOT NULL, lower_price REAL NOT NULL,
+                upper_price REAL NOT NULL, known_at_utc TEXT NOT NULL,
+                lookback_bars INTEGER NOT NULL, tolerance_bps REAL NOT NULL,
+                calendar_context_id TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE structure_zone_observations (
+                result_id INTEGER NOT NULL REFERENCES study_results(id),
+                event_id TEXT NOT NULL REFERENCES structure_zones(event_id),
+                PRIMARY KEY (result_id, event_id)
+            )"""
+        )
+        for table, condition in (
+            ("structure_zones", "event_id = NEW.event_id"),
+            (
+                "structure_zone_observations",
+                "result_id = NEW.result_id AND event_id = NEW.event_id",
+            ),
+        ):
+            for operation in ("UPDATE", "DELETE"):
+                connection.execute(
+                    f"""CREATE TRIGGER {table}_no_{operation.lower()}
+                    BEFORE {operation} ON {table}
+                    BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+                )
+            connection.execute(
+                f"""CREATE TRIGGER {table}_no_replace BEFORE INSERT ON {table}
+                WHEN EXISTS (SELECT 1 FROM {table} WHERE ({condition}) OR rowid = NEW.rowid)
+                BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+            )
+
     def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
         """Phase 1B.3 schema: structured provenance and an explicit cache-format column."""
         statements = (
@@ -751,7 +800,7 @@ class SQLitePersistence:
 
     def save_study_result(self, result: StudyResult) -> None:
         """Atomically append a study result and all immutable event observations."""
-        if any(isinstance(event, StructureBreakEvent) for event in result.events):
+        if any(isinstance(event, (StructureBreakEvent, StructureZone)) for event in result.events):
             validate_study_result(result)
         with self._connection() as connection:
             cursor = connection.execute(
@@ -788,6 +837,27 @@ class SQLitePersistence:
             if result_id is None:
                 raise RuntimeError("SQLite did not return the persisted study-result ID")
             for event in result.events:
+                if isinstance(event, StructureZone):
+                    row = connection.execute(
+                        f"SELECT {_ZONE_COLUMNS} FROM structure_zones WHERE event_id = ?",
+                        (event.event_id,),
+                    ).fetchone()
+                    if row is None:
+                        connection.execute(
+                            f"INSERT INTO structure_zones ({_ZONE_COLUMNS}) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            _zone_values(event),
+                        )
+                    elif _zone_from_row(row) != event:
+                        raise StudyEventConflictError(
+                            f"stored event {event.event_id} has a conflicting immutable payload"
+                        )
+                    connection.execute(
+                        "INSERT INTO structure_zone_observations (result_id, event_id) "
+                        "VALUES (?, ?)",
+                        (result_id, event.event_id),
+                    )
+                    continue
                 if isinstance(event, StructureBreakEvent):
                     row = connection.execute(
                         f"SELECT {_BREAK_EVENT_COLUMNS} FROM structure_break_events "
@@ -884,9 +954,21 @@ class SQLitePersistence:
                 """,
                 (row[0],),
             ).fetchall()
-        all_events: list[StudyEvent | StructureBreakEvent] = [
+            zone_rows = (
+                connection.execute(
+                    f"""SELECT {_ZONE_SELECT_COLUMNS}
+                    FROM structure_zones e
+                    JOIN structure_zone_observations o ON o.event_id = e.event_id
+                    WHERE o.result_id = ?""",
+                    (row[0],),
+                ).fetchall()
+                if self._get_version(connection) >= 9
+                else []
+            )
+        all_events: list[StudyEvent | StructureBreakEvent | StructureZone] = [
             *(_study_event_from_row(item) for item in event_rows),
             *(_break_event_from_row(item) for item in break_rows),
+            *(_zone_from_row(item) for item in zone_rows),
         ]
         events = tuple(sorted(all_events, key=_study_event_order))
         return _study_result_from_row(row, events)
@@ -1001,8 +1083,10 @@ def _study_event_values(event: StudyEvent) -> tuple[object, ...]:
 
 
 def _study_event_order(
-    event: StudyEvent | StructureBreakEvent,
+    event: StudyEvent | StructureBreakEvent | StructureZone,
 ) -> tuple[datetime, datetime, str, str]:
+    if isinstance(event, StructureZone):
+        return (event.known_at_utc, event.known_at_utc, event.zone_type.value, event.event_id)
     if isinstance(event, StructureBreakEvent):
         return (
             event.known_at_utc,
@@ -1016,6 +1100,96 @@ def _study_event_order(
         event.event_type.value,
         event.event_id,
     )
+
+
+def _zone_values(zone: StructureZone) -> tuple[object, ...]:
+    return (
+        zone.event_id,
+        zone.study_id,
+        zone.version,
+        zone.instrument,
+        zone.timeframe,
+        zone.zone_type.value,
+        json.dumps(zone.member_ids),
+        json.dumps(zone.member_prices),
+        zone.lower_price,
+        zone.upper_price,
+        _utc_isoformat(zone.known_at_utc),
+        zone.lookback_bars,
+        zone.tolerance_bps,
+        zone.calendar_context_id,
+    )
+
+
+def _zone_from_row(row: tuple[object, ...]) -> StructureZone:
+    try:
+        (
+            event_id,
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            zone_type,
+            member_ids_json,
+            member_prices_json,
+            lower,
+            upper,
+            known_at,
+            lookback,
+            tolerance,
+            context,
+        ) = row
+        texts = (
+            event_id,
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            zone_type,
+            member_ids_json,
+            member_prices_json,
+            context,
+        )
+        if any(type(value) is not str for value in texts):
+            raise StoredStudyResultError("stored zone text column has the wrong type")
+        assert isinstance(event_id, str) and isinstance(study_id, str)
+        assert isinstance(version, str) and isinstance(instrument, str)
+        assert isinstance(timeframe, str) and isinstance(zone_type, str)
+        assert isinstance(member_ids_json, str) and isinstance(member_prices_json, str)
+        assert isinstance(context, str)
+        ids = json.loads(member_ids_json, parse_constant=_reject_constant)
+        prices = json.loads(member_prices_json, parse_constant=_reject_constant)
+        if type(ids) is not list or type(prices) is not list:
+            raise StoredStudyResultError("stored zone members must be JSON arrays")
+        if (
+            type(lower) not in (int, float)
+            or type(upper) not in (int, float)
+            or type(lookback) is not int
+            or type(tolerance) not in (int, float)
+        ):
+            raise StoredStudyResultError("stored zone numeric column has the wrong type")
+        assert isinstance(lower, (int, float)) and isinstance(upper, (int, float))
+        assert isinstance(lookback, int) and isinstance(tolerance, (int, float))
+        return StructureZone(
+            event_id,
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            StructureZoneType(zone_type),
+            tuple(ids),
+            tuple(prices),
+            lower,
+            upper,
+            parse_utc_z(known_at),
+            lookback,
+            tolerance,
+            context,
+        )
+    except StoredStudyResultError:
+        raise
+    except (TypeError, ValueError) as error:
+        raise StoredStudyResultError("stored structure zone row is corrupt") from error
 
 
 def _break_event_values(event: StructureBreakEvent) -> tuple[object, ...]:
@@ -1177,7 +1351,8 @@ def as_utc(value: datetime) -> datetime:
 
 
 def _study_result_from_row(
-    row: tuple[object, ...], events: tuple[StudyEvent | StructureBreakEvent, ...] = ()
+    row: tuple[object, ...],
+    events: tuple[StudyEvent | StructureBreakEvent | StructureZone, ...] = (),
 ) -> StudyResult:
     """Strictly rebuild a StudyResult; any violation raises StoredStudyResultError."""
     try:

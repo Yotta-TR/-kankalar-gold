@@ -1,5 +1,28 @@
 # Architecture Decisions
 
+## ADR-022: Confirmed-swing support and resistance zones (Phase 2E)
+
+- **Decision:** `structure.sr_zones` v0.1.0 requires explicit positive
+  left/right swing windows, pivot lookback and tolerance in basis points.
+  Its minimum is the larger of swing warm-up and lookback. The latest
+  completed `lookback_bars` select pivots; earlier supplied bars may provide
+  left-hand context. Support uses lows and resistance uses highs independently.
+- **Clustering:** sort by price and swing ID. From the first/lowest anchor,
+  include a level exactly when `(level-anchor)*10000 <= anchor*tolerance_bps`.
+  Otherwise start another cluster; discard singletons. Decimal representations
+  are compared exactly, avoiding floating-point boundary drift and transitive
+  chains. Zone bounds are member extrema, and known time is the latest
+  member confirmation.
+- **Identity and persistence:** frozen `StructureZone` records contain member
+  IDs and prices, known time, configuration and calendar context. Their hash
+  includes those fields and the study/market identity. Schema v9 atomically
+  appends records and observations, guards update/delete/replacement including
+  rowid collisions, preserves older schemas and restores cache events.
+  A membership or member-price change creates a different identity.
+- **Scope:** descriptive only; no volume influences zones or their ordering.
+  Volume-based strength is unavailable and unimplemented. Remaining structural
+  definitions, including zone lifecycle and ranking, are listed in the catalogue.
+
 ## ADR-001: Research-only boundary in Phase 0
 
 - **Decision:** Configuration validation fixes safe mode on, live trading off,
