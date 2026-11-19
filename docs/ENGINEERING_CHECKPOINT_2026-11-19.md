@@ -121,3 +121,24 @@
 - Added synthetic boundary, numerical, persistence, pipeline and no-lookahead
   checks, including runner-level RSI overflow regression. These studies are
   not trading signals or predictive claims; see ADR-019 and the catalogue.
+
+## Phase 2C — 2026-11-19
+
+- Implemented `structure.swings` v0.1.0 with required positive integer
+  `left_bars` and `right_bars`, strict unique extrema, independent high/low
+  evaluation, and delayed confirmation timestamps. A pivot timestamp is the
+  opening time of its candle; `known_at_utc` is the completion of its last
+  right-hand confirmation candle.
+- Added immutable typed event collections to study outputs/results and a
+  contextual runner hook carrying cutoff, timeframe, validated calendar
+  timezone, snapshot ID, and input-window metadata. D1 confirmation uses
+  local-day completion and therefore honors 23-, 24-, and 25-hour calendar
+  days where applicable.
+- SQLite schema v5 adds append-only study-event identities and result
+  observations. Event identities exclude retrieval/snapshot time. Result,
+  events, and observation links persist atomically; identical observations
+  reuse event identities and conflicting payloads fail closed. Cache hits
+  restore structured events.
+- BOS/CHoCH, zones, equal-level treatment, prominence, and other downstream
+  structure choices remain **[TBD]**. No predictive value or trading approval
+  is claimed. See ADR-020 and the study catalogue.

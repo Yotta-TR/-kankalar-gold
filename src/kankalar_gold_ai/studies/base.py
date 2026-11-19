@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from fractions import Fraction
-from typing import NamedTuple, Protocol, TypeAlias, final
+from typing import NamedTuple, Protocol, TypeAlias, final, runtime_checkable
 
-from kankalar_gold_ai.core.contracts import Direction, MarketBar, StudyStatus
+from kankalar_gold_ai.core.contracts import Direction, MarketBar, StudyEvent, StudyStatus
 from kankalar_gold_ai.studies.errors import StudyConfigError
 
 ConfigValue: TypeAlias = str | int | float | bool | None
@@ -41,6 +43,67 @@ class BarStudy(Protocol):
         bars: tuple[MarketBar, ...],
         config: Mapping[str, ConfigValue],
     ) -> StudyOutput: ...
+
+
+@runtime_checkable
+class ContextualBarStudy(BarStudy, Protocol):
+    """Optional study hook for computations that require runner metadata."""
+
+    def compute_with_context(
+        self,
+        bars: tuple[MarketBar, ...],
+        config: Mapping[str, ConfigValue],
+        context: StudyComputationContext,
+    ) -> StudyOutput: ...
+
+
+@dataclass(frozen=True, slots=True)
+class StudyComputationContext:
+    """Validated runner metadata needed by calendar- and snapshot-aware studies."""
+
+    timeframe: str
+    as_of_utc: datetime
+    calendar_timezone: str | None
+    data_snapshot_id: str
+    input_bar_count: int
+    input_source: str
+    input_window_start_utc: datetime
+    input_window_end_utc: datetime
+
+    def __post_init__(self) -> None:
+        if type(self.timeframe) is not str or not self.timeframe:
+            raise ValueError("timeframe must be a non-empty built-in string")
+        if self.calendar_timezone is not None and type(self.calendar_timezone) is not str:
+            raise ValueError("calendar_timezone must be a built-in string or None")
+        if type(self.data_snapshot_id) is not str or not self.data_snapshot_id:
+            raise ValueError("data_snapshot_id must be a non-empty built-in string")
+        if type(self.input_bar_count) is not int or self.input_bar_count < 1:
+            raise ValueError("input_bar_count must be a positive built-in integer")
+        if type(self.input_source) is not str or not self.input_source:
+            raise ValueError("input_source must be a non-empty built-in string")
+        timestamps = (
+            ("as_of_utc", self.as_of_utc),
+            ("input_window_start_utc", self.input_window_start_utc),
+            ("input_window_end_utc", self.input_window_end_utc),
+        )
+        for name, value in timestamps:
+            if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{name} must be a timezone-aware datetime")
+        object.__setattr__(self, "as_of_utc", self.as_of_utc.astimezone(timezone.utc))
+        object.__setattr__(
+            self,
+            "input_window_start_utc",
+            self.input_window_start_utc.astimezone(timezone.utc),
+        )
+        object.__setattr__(
+            self,
+            "input_window_end_utc",
+            self.input_window_end_utc.astimezone(timezone.utc),
+        )
+        if self.input_window_start_utc >= self.input_window_end_utc:
+            raise ValueError("input window start must precede its end")
+        if self.input_window_end_utc > self.as_of_utc:
+            raise ValueError("input window must not extend past as_of_utc")
 
 
 def validate_config_values(values: Mapping[str, object]) -> dict[str, ConfigValue]:
@@ -86,6 +149,12 @@ def _string_tuple(name: str, values: object) -> tuple[str, ...]:
     return copied
 
 
+def _event_tuple(values: object) -> tuple[StudyEvent, ...]:
+    if type(values) is not tuple or any(type(value) is not StudyEvent for value in values):
+        raise ValueError("events must be an immutable tuple of StudyEvent values")
+    return values
+
+
 class _StudyOutputFields(NamedTuple):
     status: StudyStatus
     state: str | None
@@ -95,6 +164,7 @@ class _StudyOutputFields(NamedTuple):
     uncertainty: float | None
     evidence: tuple[str, ...]
     limitations: tuple[str, ...]
+    events: tuple[StudyEvent, ...]
 
 
 @final
@@ -122,6 +192,7 @@ class StudyOutput(tuple[_StudyOutputFields]):
         uncertainty: float | None = None,
         evidence: tuple[str, ...] = (),
         limitations: tuple[str, ...] = (),
+        events: tuple[StudyEvent, ...] = (),
     ) -> StudyOutput:
         if not isinstance(status, StudyStatus) or status not in STUDY_OUTPUT_STATUSES:
             raise ValueError(f"study output status is not allowed: {status!r}")
@@ -147,6 +218,7 @@ class StudyOutput(tuple[_StudyOutputFields]):
             _validated_output_number("uncertainty", uncertainty),
             _string_tuple("evidence", evidence),
             _string_tuple("limitations", limitations),
+            _event_tuple(events),
         )
         return tuple.__new__(cls, (fields,))
 
@@ -182,6 +254,10 @@ class StudyOutput(tuple[_StudyOutputFields]):
     def limitations(self) -> tuple[str, ...]:
         return self[0].limitations
 
+    @property
+    def events(self) -> tuple[StudyEvent, ...]:
+        return self[0].events
+
     def __eq__(self, other: object) -> bool:
         if type(other) is not type(self):
             return False
@@ -201,5 +277,6 @@ class StudyOutput(tuple[_StudyOutputFields]):
             f"StudyOutput(status={self.status!r}, state={self.state!r}, "
             f"value={self.value!r}, normalized_value={self.normalized_value!r}, "
             f"direction={self.direction!r}, uncertainty={self.uncertainty!r}, "
-            f"evidence={self.evidence!r}, limitations={self.limitations!r})"
+            f"evidence={self.evidence!r}, limitations={self.limitations!r}, "
+            f"events={self.events!r})"
         )

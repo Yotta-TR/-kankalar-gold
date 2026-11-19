@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from kankalar_gold_ai.core.contracts import Direction, StudyResult, StudyStatus
+from kankalar_gold_ai.core.contracts import Direction, StudyEvent, StudyResult, StudyStatus
 
 CACHE_FORMAT_VERSION = "study-result-v1"
 
@@ -212,6 +212,22 @@ def validate_study_result(result: StudyResult) -> None:
             type(items) is tuple and all(type(item) is str for item in items),
             f"{name} must be a tuple of built-in strings",
         )
+    _require(
+        type(result.events) is tuple and all(type(event) is StudyEvent for event in result.events),
+        "events must be a tuple of StudyEvent values",
+    )
+    event_ids: set[str] = set()
+    for event in result.events:
+        _require(
+            (event.study_id, event.version, event.instrument, event.timeframe)
+            == (result.study_id, result.version, result.instrument, result.timeframe),
+            "study event identity must match its parent result",
+        )
+        _require(event.known_at_utc <= result.as_of_utc, "study event is not known at as_of_utc")
+        _require(event.event_id not in event_ids, "study result contains duplicate event IDs")
+        event_ids.add(event.event_id)
+    if result.events:
+        _require(result.status is StudyStatus.AVAILABLE, "events require an AVAILABLE result")
 
     if result.status is StudyStatus.AVAILABLE:
         _require(snapshot is not None, "AVAILABLE results require a data snapshot")

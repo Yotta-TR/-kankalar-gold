@@ -6,7 +6,7 @@ gold research. No trading logic or order execution is implemented.
 Phase 1A completes market-data contracts, offline quality checks, injectable
 read-only MT5 adapter, configuration-based provider selection, historical
 coverage validation, and an append-oriented versioned SQLite persistence layer
-(schema v4).
+(schema v5).
 Comprehensive testing with deterministic synthetic data verifies all components.
 This is research-only software; do not use for live market analysis.
 
@@ -83,20 +83,24 @@ before adding any broker or messaging integration.
 ## Next phase
 
 Phase 1B.3 (single-timeframe `StudyRunner`, snapshot-keyed result cache, SQLite
-schema v4) and the F4 no-lookahead harness are implemented. The pipeline's
+schema v5) and the F4 no-lookahead harness are implemented. The pipeline's
 inclusive bar-completion `end_utc` is bound to the runner's `as_of_utc`, and
 provider overreach is rejected (ADR-008). Use `retrieve_validated_bars` for
 studies; `retrieve_bars` returns a raw tuple without cutoff provenance.
 `run_pipeline_study` connects retrieval and study execution, mapping typed data
 and provider failures to persisted non-computing study results. The
 `volatility.atr`, `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, and
-`trend.roc_momentum`, `trend.macd`, and `trend.donchian` studies and independent
-multi-timeframe coordination are
+`trend.roc_momentum`, `trend.macd`, `trend.donchian`, and `structure.swings`
+studies and independent multi-timeframe coordination are
 descriptive research tools, not validated trading strategies. RSI describes
 its own movement, not a market regime; each ROC run uses one explicit horizon.
 MACD stores its histogram as the scalar result and its other components as
 evidence. Donchian uses prior completed bars and reports unclipped channel
-position. Both require explicit periods and are descriptive only.
+position. MACD and Donchian require explicit periods and are descriptive only.
+Confirmed swings return typed, immutable events: pivot time is distinct from
+confirmation time, and D1 completion uses the validated calendar timezone.
+SQLite schema v5 stores events append-only with their result observations.
+Swing events are descriptive and have no predictive or trading approval.
 Strategies and runner scheduling remain unimplemented.
 
 The MT5 adapter has bounded connection/history retries and a timeout for

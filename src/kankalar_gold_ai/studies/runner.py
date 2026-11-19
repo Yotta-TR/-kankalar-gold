@@ -14,6 +14,7 @@ from kankalar_gold_ai.core.contracts import (
     DataQualityReport,
     DataStatus,
     Direction,
+    StudyEventConflictError,
     StudyResult,
     StudyStatus,
 )
@@ -36,7 +37,12 @@ from kankalar_gold_ai.core.study_results import (
 from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS, bar_completion_utc
 from kankalar_gold_ai.data.snapshot import compute_bar_snapshot_id
 from kankalar_gold_ai.data.validated import ValidatedBarSet
-from kankalar_gold_ai.studies.base import ConfigValue, StudyOutput, validate_config_values
+from kankalar_gold_ai.studies.base import (
+    ConfigValue,
+    StudyComputationContext,
+    StudyOutput,
+    validate_config_values,
+)
 from kankalar_gold_ai.studies.errors import (
     StudyExecutionError,
     StudyPersistenceError,
@@ -221,6 +227,8 @@ class StudyRunner:
     def _save(self, result: StudyResult) -> None:
         try:
             self._store.save_study_result(result)
+        except StudyEventConflictError as error:
+            raise StudyPersistenceError("study event persistence conflict") from error
         except Exception as error:
             raise StudyPersistenceError("failed to persist study result") from error
 
@@ -381,6 +389,7 @@ class StudyRunner:
                 limitations=limitations,
                 data_snapshot_id=snapshot_id,
                 provenance=provenance,
+                events=() if output is None else output.events,
             )
 
         if len(bars.bars) < minimum:
@@ -391,7 +400,7 @@ class StudyRunner:
                 (_WARMUP_LIMITATION,),
             )
         else:
-            result = self._compute(registered, bars, normalized, build)
+            result = self._compute(registered, bars, normalized, prepared, build)
         self._validate(result)
         self._save(result)
         return result
@@ -401,10 +410,29 @@ class StudyRunner:
         registered: RegisteredStudy,
         bars: ValidatedBarSet,
         normalized: dict[str, ConfigValue],
+        prepared: PreparedStudyRun,
         build: "_Builder",
     ) -> StudyResult:
         try:
-            output: object = registered.compute(bars.bars, normalized)
+            assert prepared.input_bar_count is not None
+            assert prepared.input_source is not None
+            assert prepared.input_window_start_utc is not None
+            assert prepared.input_window_end_utc is not None
+            assert prepared.data_snapshot_id is not None
+            output: object = registered.compute(
+                bars.bars,
+                normalized,
+                StudyComputationContext(
+                    timeframe=bars.timeframe,
+                    as_of_utc=prepared.request.as_of_utc,
+                    calendar_timezone=bars.calendar_timezone,
+                    data_snapshot_id=prepared.data_snapshot_id,
+                    input_bar_count=prepared.input_bar_count,
+                    input_source=prepared.input_source,
+                    input_window_start_utc=prepared.input_window_start_utc,
+                    input_window_end_utc=prepared.input_window_end_utc,
+                ),
+            )
         except Exception as error:
             self._log_failure(registered, type(error).__name__)
             return build(StudyStatus.ERROR, None, (ERROR_EXECUTION,), (_ERROR_LIMITATION,))

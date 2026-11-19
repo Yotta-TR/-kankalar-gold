@@ -381,3 +381,35 @@
   wick-only excursions do not. Finite-input arithmetic failures persist as
   runner errors. Both are descriptive, not predictive or strategy-approved.
   No new defaults, schema, trading, scheduling or execution behavior is added.
+
+## ADR-020: Immutable confirmed-swing events and SQLite schema v5
+
+- **Decision:** Add a typed `StudyEvent` collection to `StudyOutput` and
+  `StudyResult`, with a narrow contextual-computation hook that supplies the
+  validated timeframe, cutoff, calendar timezone, snapshot ID, and input-window
+  metadata. Implement `structure.swings` v0.1.0 using explicit positive
+  `left_bars`/`right_bars`; a candidate is confirmed only when its high is
+  strictly above, or its low strictly below, every corresponding bar in both
+  complete comparison windows.
+- **Time and identity:** `pivot_time_utc` is the pivot candle's opening time.
+  `known_at_utc` is the completion of the final right-hand confirmation bar.
+  Calendar-scoped D1 completion uses the validated timezone and local-day
+  boundary. Event IDs are deterministic hashes of study/version, instrument,
+  timeframe, event type, pivot time, and window sizes; retrieval time and
+  snapshot ID are excluded.
+- **Persistence:** Schema v5 adds append-only `study_events` and
+  `study_event_observations` tables. A result row, event identities, and
+  observation links are inserted in one SQLite transaction. Existing
+  identities are compared against the full immutable payload: identical
+  repeats reuse the identity, while any conflict raises a persistence conflict
+  and rolls back the parent result. Cached results restore their event tuple;
+  deterministic retrieval is available for future structure studies. Migration
+  is additive and transactional and does not rewrite historical results.
+- **Consequences and limits:** All highs and lows are evaluated independently
+  and returned; a candle may emit both, and no alternation or prominence
+  filter is applied. Equal comparison values disqualify a candidate, including
+  flat plateaus, with no arbitrary tie break. Valid empty results are
+  `AVAILABLE` with `NO_CONFIRMED_SWINGS`. This is descriptive event
+  infrastructure only, not a prediction or trading approval. BOS/CHoCH,
+  zones, equal-level policy, and other downstream structure semantics remain
+  **[TBD]**.

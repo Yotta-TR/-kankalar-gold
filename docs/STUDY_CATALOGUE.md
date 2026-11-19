@@ -2,7 +2,7 @@
 
 Status: This catalogue documents research candidates. `volatility.atr`,
 `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, `trend.roc_momentum`,
-`trend.macd`, and `trend.donchian`
+`trend.macd`, `trend.donchian`, and `structure.swings`
 are implemented as descriptive studies; listing or implementation does not imply predictive approval or
 ensemble activation.
 This catalogue organizes the research candidates of Sections 5.1–5.6 of
@@ -481,15 +481,15 @@ predictive contribution. `trend.atr_trend` additionally depends on the ATR study
 
 Common to the group: priority **STRUCTURE**; input: closed OHLC bars (verified broker gold instrument; exact symbol to be
 discovered via MT5); the spec requires every concept to have *an operational definition, a
-detection algorithm, and out-of-sample results* [SPEC §5.2], none of which exist
-yet — so every detection rule below is **[TBD]**. Type: *descriptive*/
-*contextual*. Principal risks: repainting (swings are only known after
+detection algorithm, and out-of-sample results* [SPEC §5.2]. `structure.swings`
+is defined below; the other unimplemented detection rules remain **[TBD]**.
+Type: *descriptive/contextual*. Principal risks: repainting (swings are only known after
 confirmation), subjective definitions, session-boundary ambiguity, and
 session/calendar dependence (C1, only for session-dependent studies).
 
 | ID | Candidate | Spec text | Open decisions |
 |---|---|---|---|
-| `structure.swings` | Confirmed swing highs/lows | "with non-repainting definitions" | Confirmation rule and delay **[TBD]**; the confirmation timestamp (not the swing bar time) must be the earliest time the result is known **[SUGGESTION]** |
+| `structure.swings` | Confirmed swing highs/lows | Strict unique high/low against explicit left/right windows | Implemented as v0.1.0; see below. Other structure studies remain **[TBD]** |
 | `structure.bos_choch` | Break of Structure (BOS) and Change of Character (CHoCH) | "with exact event rules" | Exact rules **[TBD]**; depends on `structure.swings` |
 | `structure.sr_zones` | Support/resistance zones | "based on repeatable swing/volume criteria" | Zone construction, width, volume use **[TBD]**; volume only if its meaning is characterized (§10) |
 | `structure.range_failed_breakout` | Range boundaries and failed breakouts | Named only | Range and failure definitions **[TBD]** |
@@ -498,7 +498,7 @@ session/calendar dependence (C1, only for session-dependent studies).
 | `structure.liquidity_sweep` | Liquidity sweep hypotheses around prior highs/lows and equal highs/lows | Described as "hypotheses" | Level, "equal" tolerance, sweep criteria **[TBD]** |
 | `structure.candlestick_patterns` | Candlestick patterns | "only where each pattern is formally defined and independently tested" | One sub-study per pattern; none selected **[TBD]** |
 
-Common details: warm-up **[TBD]**; data-quality dependency: contiguous `VALID`
+Common details: warm-up and definitions for unimplemented studies remain **[TBD]**; data-quality dependency: contiguous `VALID`
 bars; when the session calendar is unknown (gaps reported as
 `GAP_SESSION_UNKNOWN`) session-dependent studies should not claim certainty
 **[SUGGESTION]**. Tests: non-repainting (a confirmed swing never changes),
@@ -506,6 +506,43 @@ boundary candles, equal-level tolerance edge cases, missing bars,
 no-lookahead; out-of-sample: §4.6. Prerequisites: core F1–F5; C1 only for
 `structure.session_levels` (and any other session-dependent definition adopted
 later); BOS/CHoCH and zones depend on swings; D1/D2 as in §5.1 tier C.
+
+### `structure.swings` v0.1.0
+
+- Runs independently on M1, M5, M15, H1, H4, and D1 using only a
+  `ValidatedBarSet` supplied through `StudyRunner` or the pipeline bridge.
+  Configuration requires exactly positive built-in integer `left_bars` and
+  `right_bars`; neither has a default. The minimum is
+  `left_bars + right_bars + 1`.
+- A swing high is a candidate high strictly greater than every high in the
+  immediately preceding `left_bars` bars and following `right_bars` bars.
+  A swing low uses the corresponding strict less-than comparisons. Equal
+  comparison values disqualify the candidate; flat plateaus are not assigned
+  to an arbitrary candle. There is no alternation, prominence, size, or
+  subjective filter.
+- Every confirmed event is returned in a typed collection, in deterministic
+  order; highs and lows are evaluated independently, so both can be emitted
+  for one outside-range candle and events do not need to alternate. The scalar
+  result remains `None`. A valid history with no events is `AVAILABLE` with
+  `NO_CONFIRMED_SWINGS`, not a data error.
+- `pivot_time_utc` is the opening timestamp of the pivot bar. `known_at_utc`
+  is the completion timestamp of bar `pivot_index + right_bars`, so it is
+  delayed and distinct from pivot time. D1 completion uses the validated
+  calendar timezone and local-day boundary; it is not assumed to be 24 hours.
+  The runner binds computation to `as_of_utc`, and no event may be known after
+  that cutoff.
+- Stable IDs hash study/version, instrument, timeframe, event type, pivot
+  time, and left/right settings; retrieval time and snapshot ID are excluded.
+  Event payloads are immutable. SQLite schema v5 stores one event identity and
+  append-only result-observation links, atomically with the parent result.
+  Repeated identical identities are idempotent; a conflicting payload fails
+  closed. Cache hits restore the typed event collection, and stored events can
+  be retrieved in deterministic order for future structure studies.
+- The strict unique-extreme rule rejects equal highs/lows; it intentionally
+  does not pick a first/last plateau bar. These events are descriptive only.
+  BOS/CHoCH semantics, zones, equal-level handling, and all other downstream
+  structure choices remain **[TBD]**. No predictive value or trading approval
+  is claimed.
 
 ## 8. Group 3 — Volatility [SPEC §5.3]
 
