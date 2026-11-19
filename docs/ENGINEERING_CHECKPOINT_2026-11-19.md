@@ -1,5 +1,21 @@
 # Engineering checkpoint — 2026-11-19
 
+## Phase 2E
+
+- Added descriptive `structure.sr_zones` v0.1.0, with explicit swing windows,
+  pivot lookback and basis-point tolerance. Independent high/low complete-linkage
+  clusters require two confirmed members, retain reference IDs and never use
+  volume. Volume-based strength is unavailable and unimplemented.
+- Added immutable zone identities and transactional SQLite schema v9 with
+  append-only records, observation links, rowid-aware replacement guards and
+  cache restoration. Membership changes produce new records; older observations
+  remain unchanged.
+- Structural-study open decisions, including zone lifecycle, strength and
+  ranking, remain listed in the study catalogue. No signal or strategy is added.
+- Local Python 3.14.2 validation: full pytest 950 passed; safety subset
+  18 passed (22 deselected); Ruff lint/format, strict mypy and whitespace
+  checks passed. Python 3.11 and 3.12 require CI verification.
+
 ## Reconciled starting state
 
 - The working tree began on local `main` at `7fad403a376bd1c99a266b0887cedf4e59ec140d`;

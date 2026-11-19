@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
+from fractions import Fraction
 from typing import Protocol
 
 
@@ -42,6 +43,11 @@ class StructureBreakType(StrEnum):
     INITIAL_BREAK = "INITIAL_BREAK"
     BOS = "BOS"
     CHOCH = "CHOCH"
+
+
+class StructureZoneType(StrEnum):
+    SUPPORT = "SUPPORT"
+    RESISTANCE = "RESISTANCE"
 
 
 class StudyEventConflictError(RuntimeError):
@@ -293,6 +299,119 @@ class StructureBreakEvent:
             raise ValueError("event_id does not match the canonical structure-break identity")
 
 
+def structure_zone_id(
+    study_id: str,
+    version: str,
+    instrument: str,
+    timeframe: str,
+    zone_type: StructureZoneType,
+    member_ids: tuple[str, ...],
+    member_prices: tuple[float, ...],
+    known_at_utc: datetime,
+    lookback_bars: int,
+    tolerance_bps: float,
+    calendar_context_id: str,
+) -> str:
+    """Identify an immutable zone by its complete membership and calculation context."""
+    fields = (
+        study_id,
+        version,
+        instrument,
+        timeframe,
+        zone_type.value,
+        tuple(zip(member_ids, member_prices)),
+        as_utc(known_at_utc).isoformat().replace("+00:00", "Z"),
+        lookback_bars,
+        tolerance_bps,
+        calendar_context_id,
+    )
+    canonical = json.dumps(fields, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return f"structure-zone-v1:sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+@dataclass(frozen=True, slots=True)
+class StructureZone:
+    """Immutable descriptive zone with its ordered confirmed-swing references."""
+
+    event_id: str
+    study_id: str
+    version: str
+    instrument: str
+    timeframe: str
+    zone_type: StructureZoneType
+    member_ids: tuple[str, ...]
+    member_prices: tuple[float, ...]
+    lower_price: float
+    upper_price: float
+    known_at_utc: datetime
+    lookback_bars: int
+    tolerance_bps: float
+    calendar_context_id: str
+
+    def __post_init__(self) -> None:
+        for value in (self.event_id, self.study_id, self.version, self.instrument, self.timeframe):
+            if type(value) is not str or not value:
+                raise ValueError("zone identity fields must be non-empty built-in strings")
+        if type(self.zone_type) is not StructureZoneType:
+            raise ValueError("zone_type must be a StructureZoneType")
+        if (
+            type(self.member_ids) is not tuple
+            or len(self.member_ids) < 2
+            or any(type(item) is not str or not item for item in self.member_ids)
+            or len(set(self.member_ids)) != len(self.member_ids)
+            or type(self.member_prices) is not tuple
+            or len(self.member_prices) != len(self.member_ids)
+        ):
+            raise ValueError("zone requires at least two distinct swing references and prices")
+        if any(
+            type(price) not in (int, float) or not math.isfinite(price) or price <= 0
+            for price in self.member_prices
+        ):
+            raise ValueError("zone member prices must be finite positive numbers")
+        prices = tuple(float(price) for price in self.member_prices)
+        if tuple(sorted(zip(prices, self.member_ids))) != tuple(zip(prices, self.member_ids)):
+            raise ValueError("zone members must be ordered by price and ID")
+        if self.lower_price != prices[0] or self.upper_price != prices[-1]:
+            raise ValueError("zone bounds must match member prices")
+        if type(self.lower_price) not in (int, float) or type(self.upper_price) not in (int, float):
+            raise ValueError("zone bounds must be built-in numbers")
+        if type(self.lookback_bars) is not int or self.lookback_bars <= 0:
+            raise ValueError("lookback_bars must be a positive built-in integer")
+        if (
+            type(self.tolerance_bps) not in (int, float)
+            or not math.isfinite(self.tolerance_bps)
+            or self.tolerance_bps <= 0
+        ):
+            raise ValueError("tolerance_bps must be finite and positive")
+        if not _is_calendar_context_id(self.calendar_context_id):
+            raise ValueError("invalid calendar context identity")
+        known_at = as_utc(self.known_at_utc)
+        tolerance = float(self.tolerance_bps)
+        if (Fraction(str(prices[-1])) - Fraction(str(prices[0]))) * 10000 > Fraction(
+            str(prices[0])
+        ) * Fraction(str(tolerance)):
+            raise ValueError("zone members exceed the anchor tolerance")
+        object.__setattr__(self, "member_prices", prices)
+        object.__setattr__(self, "lower_price", prices[0])
+        object.__setattr__(self, "upper_price", prices[-1])
+        object.__setattr__(self, "known_at_utc", known_at)
+        object.__setattr__(self, "tolerance_bps", tolerance)
+        if self.event_id != structure_zone_id(
+            self.study_id,
+            self.version,
+            self.instrument,
+            self.timeframe,
+            self.zone_type,
+            self.member_ids,
+            prices,
+            known_at,
+            self.lookback_bars,
+            tolerance,
+            self.calendar_context_id,
+        ):
+            raise ValueError("event_id does not match the canonical structure-zone identity")
+
+
 class DataStatus(StrEnum):
     VALID = "VALID"
     STALE = "STALE"
@@ -402,7 +521,7 @@ class StudyResult:
     limitations: tuple[str, ...]
     data_snapshot_id: str | None
     provenance: tuple[tuple[str, str], ...] = ()
-    events: tuple[StudyEvent | StructureBreakEvent, ...] = ()
+    events: tuple[StudyEvent | StructureBreakEvent | StructureZone, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of_utc", as_utc(self.as_of_utc))

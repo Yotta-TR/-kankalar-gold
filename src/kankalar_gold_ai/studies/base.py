@@ -13,6 +13,7 @@ from kankalar_gold_ai.core.contracts import (
     Direction,
     MarketBar,
     StructureBreakEvent,
+    StructureZone,
     StudyEvent,
     StudyStatus,
 )
@@ -161,9 +162,9 @@ def _string_tuple(name: str, values: object) -> tuple[str, ...]:
     return copied
 
 
-def _event_tuple(values: object) -> tuple[StudyEvent | StructureBreakEvent, ...]:
+def _event_tuple(values: object) -> tuple[StudyEvent | StructureBreakEvent | StructureZone, ...]:
     if type(values) is not tuple or any(
-        type(value) not in (StudyEvent, StructureBreakEvent) for value in values
+        type(value) not in (StudyEvent, StructureBreakEvent, StructureZone) for value in values
     ):
         raise ValueError("events must be an immutable tuple of study event values")
     return values
@@ -178,7 +179,7 @@ class _StudyOutputFields(NamedTuple):
     uncertainty: float | None
     evidence: tuple[str, ...]
     limitations: tuple[str, ...]
-    events: tuple[StudyEvent | StructureBreakEvent, ...]
+    events: tuple[StudyEvent | StructureBreakEvent | StructureZone, ...]
 
 
 @final
@@ -206,7 +207,7 @@ class StudyOutput(tuple[_StudyOutputFields]):
         uncertainty: float | None = None,
         evidence: tuple[str, ...] = (),
         limitations: tuple[str, ...] = (),
-        events: tuple[StudyEvent | StructureBreakEvent, ...] = (),
+        events: tuple[StudyEvent | StructureBreakEvent | StructureZone, ...] = (),
     ) -> StudyOutput:
         if not isinstance(status, StudyStatus) or status not in STUDY_OUTPUT_STATUSES:
             raise ValueError(f"study output status is not allowed: {status!r}")
@@ -269,7 +270,7 @@ class StudyOutput(tuple[_StudyOutputFields]):
         return self[0].limitations
 
     @property
-    def events(self) -> tuple[StudyEvent | StructureBreakEvent, ...]:
+    def events(self) -> tuple[StudyEvent | StructureBreakEvent | StructureZone, ...]:
         return self[0].events
 
     def __eq__(self, other: object) -> bool:
