@@ -13,6 +13,7 @@ from kankalar_gold_ai.studies.errors import (
 )
 from kankalar_gold_ai.studies.multitimeframe import (
     AnalysisCompleteness,
+    CalendarAwareFreshnessPolicy,
     ComponentResultEnvelope,
     FreshnessPolicy,
     MultiTimeframeAnalysisRequest,
@@ -24,6 +25,7 @@ from kankalar_gold_ai.studies.multitimeframe import (
     preflight_multi_timeframe_analysis,
 )
 from kankalar_gold_ai.studies.multitimeframe_coordinator import MultiTimeframeAnalysisCoordinator
+from kankalar_gold_ai.studies.pipeline_execution import run_pipeline_study
 from kankalar_gold_ai.studies.registry import RegisteredStudy, StudyRegistry
 from kankalar_gold_ai.studies.runner import (
     DataFailure,
@@ -37,6 +39,7 @@ __all__ = [
     "BarStudy",
     "ConfigValue",
     "AnalysisCompleteness",
+    "CalendarAwareFreshnessPolicy",
     "ComponentResultEnvelope",
     "DataFailure",
     "DuplicateStudyError",
@@ -59,6 +62,7 @@ __all__ = [
     "StudyResultStore",
     "StudyRunner",
     "StudyRunRequest",
+    "run_pipeline_study",
     "StudyOutput",
     "StudyRegistry",
     "UnknownStudyError",

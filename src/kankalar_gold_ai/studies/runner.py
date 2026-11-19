@@ -33,7 +33,7 @@ from kankalar_gold_ai.core.study_results import (
     utc_z,
     validate_study_result,
 )
-from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS
+from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS, bar_completion_utc
 from kankalar_gold_ai.data.snapshot import compute_bar_snapshot_id
 from kankalar_gold_ai.data.validated import ValidatedBarSet
 from kankalar_gold_ai.studies.base import ConfigValue, StudyOutput, validate_config_values
@@ -257,7 +257,12 @@ class StudyRunner:
         if duration is None:
             raise StudyRequestError("unsupported timeframe")
         window_start = bars.bars[0].timestamp_utc
-        window_end = max(bar.timestamp_utc for bar in bars.bars) + duration
+        latest_open = max(bar.timestamp_utc for bar in bars.bars)
+        window_end = bar_completion_utc(
+            latest_open,
+            request.timeframe,
+            timezone_name=bars.calendar_timezone,
+        )
         if _utc(window_end) > request.as_of_utc:
             raise StudyRequestError("input bars extend past the requested analysis cutoff")
         if request.as_of_utc > _utc(bars.validated_at_utc):
@@ -268,7 +273,7 @@ class StudyRunner:
             snapshot_id = compute_bar_snapshot_id(bars.bars)
         except Exception as error:
             raise StudyExecutionError("failed to compute the data snapshot ID") from error
-        latest_completed_at = max(bar.timestamp_utc for bar in bars.bars) + duration
+        latest_completed_at = window_end
         return PreparedStudyRun(
             request=request,
             study_id=registered.study_id,

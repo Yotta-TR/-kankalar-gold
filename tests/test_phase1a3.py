@@ -607,6 +607,48 @@ class TestSQLitePersistence:
         assert count == 1
         conn.close()
 
+    def test_same_timestamp_tick_and_quote_updates_are_preserved(self, db_path: Path) -> None:
+        persistence = SQLitePersistence(db_path)
+        persistence.initialize()
+        tick = MarketTick(
+            instrument="TEST_GOLD",
+            timestamp_utc=NOW,
+            timestamp_milliseconds=int(NOW.timestamp() * 1000),
+            bid=100.0,
+            ask=100.1,
+            last=None,
+            volume=None,
+            flags=2,
+            source=SYNTHETIC_SOURCE,
+            retrieved_at_utc=NOW,
+        )
+        second_tick = replace(tick, bid=100.05)
+        persistence.save_market_ticks((tick, second_tick))
+        quote = MarketQuote(
+            instrument="TEST_GOLD",
+            timestamp_utc=NOW,
+            timestamp_milliseconds=int(NOW.timestamp() * 1000),
+            bid=100.0,
+            ask=100.1,
+            last=None,
+            source=SYNTHETIC_SOURCE,
+            retrieved_at_utc=NOW,
+        )
+        second_quote = replace(quote, bid=100.05)
+        persistence.save_market_quote(quote)
+        persistence.save_market_quote(second_quote)
+
+        with sqlite3.connect(str(db_path)) as connection:
+            ticks = connection.execute("SELECT bid FROM market_ticks ORDER BY id").fetchall()
+            quotes = connection.execute("SELECT bid FROM market_quotes ORDER BY id").fetchall()
+
+        assert ticks == [(100.0,), (100.05,)]
+        assert quotes == [(100.0,), (100.05,)]
+        with pytest.raises(sqlite3.IntegrityError):
+            persistence.save_market_ticks((tick,))
+        with pytest.raises(sqlite3.IntegrityError):
+            persistence.save_market_quote((quote))
+
     def test_save_market_quote(self, db_path: Path) -> None:
         persistence = SQLitePersistence(db_path)
         persistence.initialize()
