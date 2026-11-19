@@ -42,6 +42,18 @@ class StudyEventConflictError(RuntimeError):
     """A stable study-event identity was presented with a different payload."""
 
 
+_CALENDAR_CONTEXT_ID_PREFIX = "calendar-context-v1:sha256:"
+
+
+def _is_calendar_context_id(value: object) -> bool:
+    return (
+        type(value) is str
+        and value.startswith(_CALENDAR_CONTEXT_ID_PREFIX)
+        and len(value) == len(_CALENDAR_CONTEXT_ID_PREFIX) + 64
+        and all(character in "0123456789abcdef" for character in value[-64:])
+    )
+
+
 def study_event_id(
     study_id: str,
     version: str,
@@ -54,10 +66,8 @@ def study_event_id(
     calendar_context_id: str | None = None,
 ) -> str:
     """Return a deterministic ID for an event, optionally scoped to its calendar context."""
-    if calendar_context_id is not None and (
-        type(calendar_context_id) is not str or not calendar_context_id
-    ):
-        raise ValueError("calendar_context_id must be a non-empty built-in string or None")
+    if calendar_context_id is not None and not _is_calendar_context_id(calendar_context_id):
+        raise ValueError("calendar_context_id must be a valid calendar context identity or None")
     identity_fields = (
         study_id,
         version,
@@ -175,11 +185,7 @@ class StudyEvent:
         context_marker = ":calendar-context-v1:sha256:"
         _, marker, context_digest = self.event_id.rpartition(context_marker)
         context_id = f"calendar-context-v1:sha256:{context_digest}"
-        has_valid_context = (
-            bool(marker)
-            and len(context_digest) == 64
-            and all(character in "0123456789abcdef" for character in context_digest)
-        )
+        has_valid_context = bool(marker) and _is_calendar_context_id(context_id)
         if has_valid_context:
             has_valid_context = self.event_id == study_event_id(
                 self.study_id,

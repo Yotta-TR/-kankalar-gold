@@ -418,7 +418,9 @@
   deterministic retrieval is available for future structure studies. Schema
   v6 adds an indexed nullable calendar-context identity. Historical v5 rows
   remain NULL and cannot match calendar-scoped cache keys; migration is
-  additive and transactional and does not rewrite historical results.
+  additive and transactional and does not rewrite historical results. Schema
+  v7 prevents `INSERT OR REPLACE` from bypassing event and observation
+  immutability.
 - **Consequences and limits:** All highs and lows are evaluated independently
   and returned; a candle may emit both, and no alternation or prominence
   filter is applied. Equal comparison values disqualify a candidate, including

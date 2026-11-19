@@ -268,16 +268,16 @@ def _snapshot(path: Path) -> list[tuple[object, ...]]:
         ).fetchall()
 
 
-def test_v2_to_v6_migration_preserves_data_and_old_rows_are_not_hits(tmp_path: Path) -> None:
+def test_v2_to_v7_migration_preserves_data_and_old_rows_are_not_hits(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
     _v2_db(path)
     before = _snapshot(path)
     store = SQLitePersistence(path)
     store.initialize()
-    assert SQLitePersistence.SCHEMA_VERSION == 6
+    assert SQLitePersistence.SCHEMA_VERSION == 7
     assert _snapshot(path) == before
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 7
         row = connection.execute(
             "SELECT provenance_json, cache_format_version FROM study_results"
         ).fetchone()
@@ -361,14 +361,14 @@ def _v3_market_data_db(path: Path) -> None:
         connection.executescript(V3_MARKET_DATA_SCHEMA)
 
 
-def test_v3_to_v6_migration_preserves_market_data(tmp_path: Path) -> None:
+def test_v3_to_v7_migration_preserves_market_data(tmp_path: Path) -> None:
     path = tmp_path / "events.db"
     _v3_market_data_db(path)
 
     SQLitePersistence(path).initialize()
 
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone() == (6,)
+        assert connection.execute("SELECT version FROM schema_version").fetchone() == (7,)
         study_columns = {r[1] for r in connection.execute("PRAGMA table_info(study_results)")}
         assert "calendar_context_id" in study_columns
         tick = connection.execute(

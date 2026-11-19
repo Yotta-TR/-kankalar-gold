@@ -142,7 +142,16 @@
   events, and observation links persist atomically; identical observations
   reuse event identities and conflicting payloads fail closed. Cache hits
   restore structured events. Schema v6 includes calendar identity in cache
-  lookups while keeping `data_snapshot_id` limited to bar data.
+  lookups while keeping `data_snapshot_id` limited to bar data. Schema v7 adds
+  insert guards because SQLite `INSERT OR REPLACE` could otherwise bypass the
+  update/delete triggers; migration preserves existing event records.
+- Regression coverage confirms v6 databases gain the replacement guards and
+  that event identities and observation links reject replacement as well as
+  updates and deletes.
+- Post-review local validation (Python 3.14.2): `pytest -q` — 902 passed;
+  safety subset — 18 passed, 22 deselected; `ruff check .`, `ruff format
+  --check .`, `mypy src` (52 source files), and intended-diff whitespace
+  checks — passed.
 - BOS/CHoCH, zones, equal-level treatment, prominence, and other downstream
   structure choices remain **[TBD]**. No predictive value or trading approval
   is claimed. See ADR-020 and the study catalogue.

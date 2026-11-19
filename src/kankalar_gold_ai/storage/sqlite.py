@@ -63,7 +63,7 @@ def _reject_constant(name: str) -> object:
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -130,6 +130,7 @@ class SQLitePersistence:
                     4: self._migrate_to_version_4,
                     5: self._migrate_to_version_5,
                     6: self._migrate_to_version_6,
+                    7: self._migrate_to_version_7,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -362,6 +363,34 @@ class SQLitePersistence:
                 study_id, version, instrument, timeframe, as_of_utc,
                 data_snapshot_id, inputs_json, calendar_context_id, cache_format_version
             )
+            """
+        )
+
+    def _migrate_to_version_7(self, connection: sqlite3.Connection) -> None:
+        """Prevent SQLite REPLACE from bypassing append-only event triggers."""
+        connection.execute(
+            """
+            CREATE TRIGGER study_events_no_replace
+            BEFORE INSERT ON study_events
+            WHEN EXISTS (
+                SELECT 1 FROM study_events WHERE event_id = NEW.event_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'study_events is append-only');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER study_event_observations_no_replace
+            BEFORE INSERT ON study_event_observations
+            WHEN EXISTS (
+                SELECT 1 FROM study_event_observations
+                WHERE result_id = NEW.result_id AND event_id = NEW.event_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'study_event_observations is append-only');
+            END
             """
         )
 

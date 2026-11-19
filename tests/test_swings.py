@@ -169,6 +169,21 @@ def test_registry_and_supported_timeframes() -> None:
     assert registered.required_timeframes == {"M1", "M5", "M15", "H1", "H4", "D1"}
 
 
+def test_study_event_id_rejects_malformed_calendar_context() -> None:
+    with pytest.raises(ValueError, match="calendar_context_id"):
+        study_event_id(
+            STUDY_ID,
+            VERSION,
+            INSTRUMENT,
+            "D1",
+            StudyEventType.SWING_HIGH,
+            BASE,
+            1,
+            1,
+            calendar_context_id="not-a-calendar-context",
+        )
+
+
 @pytest.mark.parametrize("timeframe", ("M1", "M5", "M15", "H1", "H4", "D1"))
 def test_study_executes_independently_on_each_supported_timeframe(
     tmp_path: Path, timeframe: str
@@ -764,14 +779,55 @@ def test_v5_migration_failure_rolls_back_to_v4(
         assert "study_event_observations" not in names
 
 
-def test_append_only_event_tables_reject_update_and_delete(tmp_path: Path) -> None:
+def test_v6_migration_preserves_append_only_event_tables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(SQLitePersistence, "SCHEMA_VERSION", 6)
+    path = tmp_path / "append-only.db"
     _result, _store, _bars = _run(
-        tmp_path / "append-only.db",
+        path,
         (5, 9, 6),
         (2, 3, 4),
     )
-    with sqlite3.connect(tmp_path / "append-only.db") as connection:
+    monkeypatch.setattr(SQLitePersistence, "SCHEMA_VERSION", 7)
+    SQLitePersistence(path).initialize()
+
+    with sqlite3.connect(path) as connection:
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             connection.execute("UPDATE study_events SET price = 999")
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             connection.execute("DELETE FROM study_events")
+
+        event = connection.execute(
+            "SELECT * FROM study_events ORDER BY event_id LIMIT 1"
+        ).fetchone()
+        assert event is not None
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(
+                "INSERT OR REPLACE INTO study_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                event,
+            )
+
+        observation = connection.execute(
+            "SELECT result_id, event_id FROM study_event_observations ORDER BY result_id LIMIT 1"
+        ).fetchone()
+        assert observation is not None
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(
+                "INSERT OR REPLACE INTO study_event_observations VALUES (?, ?)", observation
+            )
+        assert (
+            connection.execute(
+                "SELECT * FROM study_events WHERE event_id = ?", (event[0],)
+            ).fetchone()
+            == event
+        )
+        assert (
+            connection.execute(
+                "SELECT result_id, event_id FROM study_event_observations WHERE result_id = ? "
+                "AND event_id = ?",
+                observation,
+            ).fetchone()
+            == observation
+        )
