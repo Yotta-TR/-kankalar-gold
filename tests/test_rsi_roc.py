@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -277,3 +278,17 @@ def test_overflow_fails_closed(tmp_path: Path) -> None:
     assert result.value is None and result.direction is Direction.NOT_APPLICABLE
     with pytest.raises(OverflowError):
         RSIStudy().compute(bars((1.0, 1e308, 1.0, 1e308, 1.0, 1e308)), {"rsi_period": 4})
+
+
+def test_rsi_overflow_is_persisted_by_runner(tmp_path: Path) -> None:
+    study = RSIStudy()
+    runner, _ = setup(tmp_path, study)
+    result = run(runner, study, bars((1.0, 1e308, 1.0, 1e308, 1.0, 1e308)), 4)
+    assert result.status is StudyStatus.ERROR
+    assert result.value is None and result.normalized_value is None and result.uncertainty is None
+    assert result.direction is Direction.NOT_APPLICABLE
+    with sqlite3.connect(tmp_path / "momentum.db") as connection:
+        row = connection.execute(
+            "SELECT status, value, normalized_value, uncertainty, direction FROM study_results"
+        ).fetchone()
+    assert row == ("ERROR", None, None, None, "NOT_APPLICABLE")

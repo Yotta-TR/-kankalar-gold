@@ -111,3 +111,13 @@
   prohibited/out of scope.
 - Next: begin Phase 2 study work only after reviewing the integrated commits
   and preserving the research/no-lookahead acceptance gates.
+
+## Phase 2B — 2026-11-19
+
+- Added descriptive MACD and prior-completed-bar Donchian studies with explicit
+  period configurations, fail-closed arithmetic, and no new defaults or schema.
+  MACD components besides the histogram remain evidence strings; Donchian
+  position is not clipped and zero-width positions are unavailable.
+- Added synthetic boundary, numerical, persistence, pipeline and no-lookahead
+  checks, including runner-level RSI overflow regression. These studies are
+  not trading signals or predictive claims; see ADR-019 and the catalogue.

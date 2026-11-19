@@ -363,3 +363,21 @@
   normalization. RSI direction describes RSI movement, not market regime or
   overbought/oversold status. Both are descriptive, not validated strategies;
   arithmetic failures use the runner's fail-closed error path.
+
+## ADR-019: Descriptive MACD and prior-bar Donchian
+
+- **Decision:** Implement `trend.macd` and `trend.donchian` version `0.1.0`
+  with explicit positive built-in integer periods and no defaults. MACD uses
+  independently arithmetic-mean-seeded close EMAs, a mean-seeded signal EMA,
+  and `slow_period + signal_period` bars to describe current and previous
+  histogram values. Donchian uses the previous `donchian_period` completed
+  bars, excludes the current bar from the channel, and requires `period + 1`
+  bars. The catalogue specifies formulas, strict comparisons, zero cases,
+  evidence and direction semantics.
+- **Consequences:** MACD's histogram is the only structured scalar; component
+  lines and histogram change are evidence, not new database columns.
+  Donchian position is unclipped and `None` for zero width, even on a
+  breakout. Only the current close can break the prior channel; equality and
+  wick-only excursions do not. Finite-input arithmetic failures persist as
+  runner errors. Both are descriptive, not predictive or strategy-approved.
+  No new defaults, schema, trading, scheduling or execution behavior is added.

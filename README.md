@@ -90,9 +90,13 @@ studies; `retrieve_bars` returns a raw tuple without cutoff provenance.
 `run_pipeline_study` connects retrieval and study execution, mapping typed data
 and provider failures to persisted non-computing study results. The
 `volatility.atr`, `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, and
-`trend.roc_momentum` studies and independent multi-timeframe coordination are
+`trend.roc_momentum`, `trend.macd`, and `trend.donchian` studies and independent
+multi-timeframe coordination are
 descriptive research tools, not validated trading strategies. RSI describes
 its own movement, not a market regime; each ROC run uses one explicit horizon.
+MACD stores its histogram as the scalar result and its other components as
+evidence. Donchian uses prior completed bars and reports unclipped channel
+position. Both require explicit periods and are descriptive only.
 Strategies and runner scheduling remain unimplemented.
 
 The MT5 adapter has bounded connection/history retries and a timeout for
