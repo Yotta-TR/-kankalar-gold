@@ -2,7 +2,7 @@
 
 Status: This catalogue documents research candidates. `volatility.atr`,
 `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, `trend.roc_momentum`,
-`trend.macd`, `trend.donchian`, and `structure.swings`
+`trend.macd`, `trend.donchian`, `structure.swings`, and `structure.bos_choch`
 are implemented as descriptive studies; listing or implementation does not imply predictive approval or
 ensemble activation.
 This catalogue organizes the research candidates of Sections 5.1–5.6 of
@@ -74,7 +74,7 @@ Checked against the repository (not assumed):
 | Quotes and ticks | `validate_quote` reports non-finite/crossed/non-positive bid/ask, future or stale timestamps, inconsistent milliseconds, invalid last, and excessive spread. The MT5 adapter validates tick timestamp/range, finite and non-negative price values, bid/ask ordering, flags, changed-field consistency, exact duplicate records, and out-of-order events; distinct updates sharing a timestamp are preserved. Empty tick history has a typed missing-data error. Quotes and ticks still do not pass through a shared `ValidatedQuote`/`ValidatedTick` study pipeline; quote freshness/spread thresholds must be explicitly checked by the caller **[TBD]**. |
 | Instrument | The logical project identity is `GOLD_USD` [SPEC §19]; the broker symbol is `null` until discovered and confirmed from MT5 [SPEC §19]. It is commonly labelled XAUUSD, but the exact symbol is unresolved. |
 | Gap semantics (`data/calendar.py`, `data/quality.py`) | Gaps are classified with an explicit broker/instrument calendar. Known closures are retained as valid-quality diagnostics, open-session missing bars and unknown calendar coverage fail closed. The typed calendar contract has no broker schedule or timezone defaults; all calendar tests use synthetic schedules. |
-| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; schema v4 rebuilds quote/tick tables with event identities; schema v5 adds immutable study events and result observations; schema v6 adds the calendar-context cache identity; schema v7 prevents `INSERT OR REPLACE` from bypassing event immutability. `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row using the full cache key (see ADR-007 and ADR-020). Data-record writes are insert-only through the persistence API; schema migrations and each write batch are transactional. Current schema version 7. |
+| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON. Schema v3 adds provenance; v4 rebuilds quote/tick identities; v5 adds immutable swing events and observations; v6 adds calendar-context cache identity; v7 blocks identity-based replacement; v8 adds structure-break events and observations and rowid replacement guards. `find_cached_study_result` validates the newest eligible row using the full cache key. Migrations and each write batch are transactional. Current schema version 8. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
 | Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. |
 | Pipeline failure integration | `studies.pipeline_execution.run_pipeline_study` runs only validated bars; known quality, empty-history, and typed provider failures become persisted non-computing `StudyResult`s with status/reason/source evidence. Other request/programming errors still propagate. |
@@ -482,7 +482,7 @@ predictive contribution. `trend.atr_trend` additionally depends on the ATR study
 Common to the group: priority **STRUCTURE**; input: closed OHLC bars (verified broker gold instrument; exact symbol to be
 discovered via MT5); the spec requires every concept to have *an operational definition, a
 detection algorithm, and out-of-sample results* [SPEC §5.2]. `structure.swings`
-is defined below; the other unimplemented detection rules remain **[TBD]**.
+and `structure.bos_choch` are defined below; other unimplemented rules remain **[TBD]**.
 Type: *descriptive/contextual*. Principal risks: repainting (swings are only known after
 confirmation), subjective definitions, session-boundary ambiguity, and
 session/calendar dependence (C1, only for session-dependent studies).
@@ -490,7 +490,7 @@ session/calendar dependence (C1, only for session-dependent studies).
 | ID | Candidate | Spec text | Open decisions |
 |---|---|---|---|
 | `structure.swings` | Confirmed swing highs/lows | Strict unique high/low against explicit left/right windows | Implemented as v0.1.0; see below. Other structure studies remain **[TBD]** |
-| `structure.bos_choch` | Break of Structure (BOS) and Change of Character (CHoCH) | "with exact event rules" | Exact rules **[TBD]**; depends on `structure.swings` |
+| `structure.bos_choch` | Break of Structure (BOS) and Change of Character (CHoCH) | "with exact event rules" | Implemented as v0.1.0; depends on `structure.swings` |
 | `structure.sr_zones` | Support/resistance zones | "based on repeatable swing/volume criteria" | Zone construction, width, volume use **[TBD]**; volume only if its meaning is characterized (§10) |
 | `structure.range_failed_breakout` | Range boundaries and failed breakouts | Named only | Range and failure definitions **[TBD]** |
 | `structure.session_levels` | Opening range and session highs/lows | Named only | Session definitions, time zones, DST **[TBD]**; needs C1 |
@@ -550,9 +550,42 @@ later); BOS/CHoCH and zones depend on swings; D1/D2 as in §5.1 tier C.
   retrieved in deterministic order for future structure studies.
 - The strict unique-extreme rule rejects equal highs/lows; it intentionally
   does not pick a first/last plateau bar. These events are descriptive only.
-  BOS/CHoCH semantics, zones, equal-level handling, and all other downstream
-  structure choices remain **[TBD]**. No predictive value or trading approval
-  is claimed.
+  Zones and other downstream structure choices remain **[TBD]**. No predictive
+  value or trading approval is claimed.
+
+### `structure.bos_choch` v0.1.0
+
+- Uses the same explicit swing configuration and timeframes as
+  `structure.swings`, with minimum `left_bars + right_bars + 2` completed bars.
+  Only swings whose confirmation time is at or before the break candle's open
+  are eligible. On a bullish break, the previous close is at or below a swing
+  high and the completed current close is strictly above it; the bearish rule
+  mirrors this for swing lows. Equality of the current close and wick-only
+  crossings are not breaks.
+- When one candle crosses multiple eligible unconsumed levels, emit one event
+  for the nearest level from the previous close. Equal-price ties choose the
+  latest confirmation, then the latest pivot, then the lexicographically greatest
+  event ID. All crossed eligible levels are consumed, including levels not
+  emitted. Later re-crossings of those levels do not create another event.
+- Bias starts unset for the supplied history: the first event is
+  `INITIAL_BREAK`, a break in the bias direction is `BOS`, and an opposite
+  break is `CHOCH` and flips the bias. A history starting later can therefore
+  produce a different classification. The current bias is descriptive, not
+  a signal. Empty valid histories return `NO_STRUCTURE_BREAKS` with
+  `NOT_APPLICABLE` direction.
+- Each frozen `StructureBreakEvent` contains a deterministic ID, reference
+  swing ID, level, direction, classification, break-bar open, completion
+  `known_at_utc`, and calendar-context identity. The ID hashes the
+  study/version, instrument, timeframe, reference, break time, and calendar
+  identity. Result provenance stores the canonical calendar context.
+  Schema v8 stores breaks and observation links separately from swings, atomically
+  with each parent result. Identical event identities are reused; conflicting
+  payloads fail and roll back. Cache hits restore the typed records.
+- D1 uses local-day completion with an explicit validated calendar, including
+  DST, or fixed UTC days without one. Computation replays the supplied window;
+  it does not recover bias before that window. Worst-case candidate selection
+  scans prior swings for each candle. No prediction or trading approval is
+  implied.
 
 ## 8. Group 3 — Volatility [SPEC §5.3]
 

@@ -27,15 +27,27 @@ errors are persisted as non-computing study results with status and stable
 source/reason evidence. Invalid requests and unclassified exceptions still
 raise. The helper is an offline integration seam; it does not initialize MT5.
 
-SQLite migrations through schema v7 are transactional. Schema v4 upgrades
+SQLite migrations through schema v8 are transactional. Schema v4 upgrades
 quote/tick event identity, schema v5 adds append-only study events and result
 observations, schema v6 indexes the calendar-context cache identity, and schema
-v7 blocks `INSERT OR REPLACE` from replacing existing study-event identities or
-observations. Event identity excludes retrieval time: exact repeated quote/tick
+v7 blocks `INSERT OR REPLACE` on matching study-event identities or
+observations. Schema v8 adds separate immutable structure-break records and
+observation links, and protects both event families against replacement via
+explicit rowid collisions. Event identity excludes retrieval time: exact repeated quote/tick
 events are rejected, while distinct updates sharing a timestamp are retained in
 insertion order. Persistence APIs are insert-only; triggers guard updates,
 deletes, and replacements on study-event tables, but do not prevent arbitrary
 direct edits to other database tables.
+
+Register `BosChochStudy` with `StudyRegistry` and use `StudyRunner` or
+`run_pipeline_study` with explicit positive `left_bars` and `right_bars`.
+The runner requires a matching validated cutoff and completed candles. A
+break record is available only at candle completion; the reference swing must
+already be confirmed at candle open. Retain the same history start, calendar
+context, and configuration when reproducing a bias: a truncated history may
+start with a different bias and an immutable-payload conflict will fail the
+write. SQLite event identities and observations are protected, but direct SQL
+can still corrupt unrelated tables.
 
 Future integrations require bounded retries, supported timeouts, health
 reporting, idempotent jobs, graceful shutdown, and independently reviewed

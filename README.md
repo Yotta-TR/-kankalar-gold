@@ -6,7 +6,7 @@ gold research. No trading logic or order execution is implemented.
 Phase 1A completes market-data contracts, offline quality checks, injectable
 read-only MT5 adapter, configuration-based provider selection, historical
 coverage validation, and an append-oriented versioned SQLite persistence layer
-(schema v7).
+(schema v8).
 Comprehensive testing with deterministic synthetic data verifies all components.
 This is research-only software; do not use for live market analysis.
 
@@ -83,14 +83,14 @@ before adding any broker or messaging integration.
 ## Next phase
 
 Phase 1B.3 (single-timeframe `StudyRunner`, snapshot- and calendar-context-keyed
-result cache, SQLite schema v7) and the F4 no-lookahead harness are implemented. The pipeline's
+result cache) and the F4 no-lookahead harness are implemented. The pipeline's
 inclusive bar-completion `end_utc` is bound to the runner's `as_of_utc`, and
 provider overreach is rejected (ADR-008). Use `retrieve_validated_bars` for
 studies; `retrieve_bars` returns a raw tuple without cutoff provenance.
 `run_pipeline_study` connects retrieval and study execution, mapping typed data
 and provider failures to persisted non-computing study results. The
 `volatility.atr`, `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, and
-`trend.roc_momentum`, `trend.macd`, `trend.donchian`, and `structure.swings`
+`trend.roc_momentum`, `trend.macd`, `trend.donchian`, `structure.swings`, and `structure.bos_choch`
 studies and independent multi-timeframe coordination are
 descriptive research tools, not validated trading strategies. RSI describes
 its own movement, not a market regime; each ROC run uses one explicit horizon.
@@ -103,8 +103,18 @@ Calendar identity participates in cache lookup independently of the unchanged
 bar-data snapshot. Without an explicit calendar, D1 completion uses fixed
 24-hour UTC days. SQLite schema v5 stores events append-only with their result observations;
 schema v6 adds the calendar-context cache identity, and schema v7 blocks
-`INSERT OR REPLACE` from bypassing event immutability.
-Swing events are descriptive and have no predictive or trading approval.
+replacement using existing event and observation identities.
+`structure.bos_choch` v0.1.0 uses only swings confirmed by the break candle's
+open, and requires a completed close strictly across the level from a previous
+close on the unbroken side. It selects the nearest crossed level, breaking
+equal-price ties by latest confirmation; the first break is `INITIAL_BREAK`,
+same-direction breaks are `BOS`, and opposite breaks are `CHOCH` with a bias
+flip. All levels crossed in that candle are consumed, even when only the nearest
+is reported. Schema v8 persists immutable break records and observations and
+strengthens replacement guards against explicit rowid collisions. The initial
+bias depends on the beginning of the supplied history; keep the history window
+consistent for replay. These events are descriptive and have no predictive or
+trading approval.
 Strategies and runner scheduling remain unimplemented.
 
 The MT5 adapter has bounded connection/history retries and a timeout for

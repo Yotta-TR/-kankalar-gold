@@ -14,7 +14,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from kankalar_gold_ai.core.contracts import Direction, StudyEvent, StudyResult, StudyStatus
+from kankalar_gold_ai.core.contracts import (
+    Direction,
+    StructureBreakEvent,
+    StudyEvent,
+    StudyResult,
+    StudyStatus,
+)
 
 CACHE_FORMAT_VERSION = "study-result-v1"
 
@@ -265,8 +271,9 @@ def validate_study_result(result: StudyResult) -> None:
             f"{name} must be a tuple of built-in strings",
         )
     _require(
-        type(result.events) is tuple and all(type(event) is StudyEvent for event in result.events),
-        "events must be a tuple of StudyEvent values",
+        type(result.events) is tuple
+        and all(type(event) in (StudyEvent, StructureBreakEvent) for event in result.events),
+        "events must be a tuple of study event values",
     )
     event_ids: set[str] = set()
     for event in result.events:
@@ -280,6 +287,13 @@ def validate_study_result(result: StudyResult) -> None:
         event_ids.add(event.event_id)
     if result.events:
         _require(result.status is StudyStatus.AVAILABLE, "events require an AVAILABLE result")
+        context_id = provenance_mapping(result.provenance).get(PROV_CALENDAR_CONTEXT_ID)
+        for event in result.events:
+            if isinstance(event, StructureBreakEvent):
+                _require(
+                    event.calendar_context_id == context_id,
+                    "structure break calendar context must match its parent result",
+                )
 
     if result.status is StudyStatus.AVAILABLE:
         _require(snapshot is not None, "AVAILABLE results require a data snapshot")

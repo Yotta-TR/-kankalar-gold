@@ -426,6 +426,36 @@
   filter is applied. Equal comparison values disqualify a candidate, including
   flat plateaus, with no arbitrary tie break. Valid empty results are
   `AVAILABLE` with `NO_CONFIRMED_SWINGS`. This is descriptive event
-  infrastructure only, not a prediction or trading approval. BOS/CHoCH,
-  zones, equal-level policy, and other downstream structure semantics remain
-  **[TBD]**.
+  infrastructure only, not a prediction or trading approval. BOS/CHoCH and
+  equal-level policy were subsequently decided in ADR-021; zones and other
+  downstream structure semantics remain **[TBD]**.
+
+## ADR-021: Completed-close structure breaks and immutable schema v8
+
+- **Decision:** `structure.bos_choch` v0.1.0 reuses confirmed strict swings
+  with explicit left/right parameters. A swing must be known by the break
+  candle's open. Its completed close must cross strictly above a swing high
+  from a previous close at or below it, or strictly below a swing low from a
+  previous close at or above it. Intrabar excursions and equal current closes
+  do not qualify. Confirmation at the break candle's close is too late.
+- **Selection and state:** Emit at most one event per candle, selecting the
+  nearest eligible level from the previous close. Equal levels choose latest
+  confirmation, then latest pivot, then greatest event ID. All crossed
+  eligible levels are consumed, including unreported levels. The first break
+  is `INITIAL_BREAK`; same-bias breaks are `BOS`; an opposite break is
+  `CHOCH` and flips the bias. Bias begins unset at the start of the supplied
+  history, not at an inferred market origin.
+- **Time and persistence:** A separate frozen `StructureBreakEvent` preserves
+  the reference swing ID, level, direction, classification, break opening
+  timestamp, completion timestamp, and calendar-context identity. Its
+  deterministic ID includes study/version, market, reference, break time and
+  calendar context. Schema v8 adds separate append-only break records and
+  result-observation links without changing swing payloads. Parent result,
+  events and links commit together; conflicting payloads roll back. The
+  migration also strengthens swing and break REPLACE guards against explicit
+  rowid collisions, independently of SQLite's recursive-trigger setting.
+- **Limits:** D1 completion follows the validated calendar or fixed UTC
+  fallback. Input-window changes can alter the initial bias and cause an
+  immutable-payload conflict, so replay requires a consistent history start.
+  Candidate selection can be quadratic in the number of bars. These records
+  describe historical data; they are not predictive or trading approval.
