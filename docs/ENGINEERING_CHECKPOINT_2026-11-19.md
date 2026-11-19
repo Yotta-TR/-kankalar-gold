@@ -12,6 +12,15 @@
   repository before reconciliation. Existing review exports were preserved.
 - Integrated work is being carried on
   `feature/wp1-wp5-integration-20261119`, created from the observed local HEAD.
+- The pre-existing DMI/ADX commit remains part of the feature branch. The
+  reviewed integration commits are `54e0d11` (calendar), `e555210` (MT5 and
+  fail-closed study integration), and `f491431` (SQLite and documentation).
+- The feature branch was pushed to `origin` and PR #1 was opened against
+  `main`. No GitHub status checks were reported when this checkpoint was
+  recorded; local validation results are listed below.
+- All intended non-protected changes are committed, with no unstaged tracked
+  changes. Pre-existing protected staged entries and untracked review exports
+  remain preserved and are not part of these commits.
 
 ## Work-package record
 
