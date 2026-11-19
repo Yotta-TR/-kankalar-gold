@@ -6,6 +6,7 @@ from kankalar_gold_ai.studies.base import (
     StudyComputationContext,
     StudyOutput,
 )
+from kankalar_gold_ai.studies.bos_choch import BosChochStudy
 from kankalar_gold_ai.studies.errors import (
     DuplicateStudyError,
     InvalidStudyError,
@@ -43,6 +44,7 @@ from kankalar_gold_ai.studies.swings import ConfirmedSwingsStudy
 
 __all__ = [
     "BarStudy",
+    "BosChochStudy",
     "ConfigValue",
     "AnalysisCompleteness",
     "CalendarAwareFreshnessPolicy",

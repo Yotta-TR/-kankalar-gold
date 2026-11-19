@@ -16,6 +16,8 @@ from kankalar_gold_ai.core.contracts import (
     MarketQuote,
     MarketTick,
     SignalLifecycleEvent,
+    StructureBreakEvent,
+    StructureBreakType,
     StudyEvent,
     StudyEventConflictError,
     StudyEventType,
@@ -54,6 +56,14 @@ _STUDY_EVENT_COLUMNS = (
 _STUDY_EVENT_SELECT_COLUMNS = ", ".join(
     f"e.{column}" for column in _STUDY_EVENT_COLUMNS.split(", ")
 )
+_BREAK_EVENT_COLUMNS = (
+    "event_id, study_id, version, instrument, timeframe, reference_swing_id, "
+    "broken_level, break_bar_time_utc, known_at_utc, direction, classification, "
+    "calendar_context_id"
+)
+_BREAK_EVENT_SELECT_COLUMNS = ", ".join(
+    f"e.{column}" for column in _BREAK_EVENT_COLUMNS.split(", ")
+)
 
 
 def _reject_constant(name: str) -> object:
@@ -63,7 +73,7 @@ def _reject_constant(name: str) -> object:
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -131,6 +141,7 @@ class SQLitePersistence:
                     5: self._migrate_to_version_5,
                     6: self._migrate_to_version_6,
                     7: self._migrate_to_version_7,
+                    8: self._migrate_to_version_8,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -393,6 +404,64 @@ class SQLitePersistence:
             END
             """
         )
+
+    def _migrate_to_version_8(self, connection: sqlite3.Connection) -> None:
+        """Store structure breaks separately without changing swing-event semantics."""
+        connection.execute(
+            """
+            CREATE TABLE structure_break_events (
+                event_id TEXT NOT NULL PRIMARY KEY,
+                study_id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                reference_swing_id TEXT NOT NULL,
+                broken_level REAL NOT NULL,
+                break_bar_time_utc TEXT NOT NULL,
+                known_at_utc TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                classification TEXT NOT NULL,
+                calendar_context_id TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE structure_break_observations (
+                result_id INTEGER NOT NULL REFERENCES study_results(id),
+                event_id TEXT NOT NULL REFERENCES structure_break_events(event_id),
+                PRIMARY KEY (result_id, event_id)
+            )
+            """
+        )
+        for table, condition in (
+            ("structure_break_events", "event_id = NEW.event_id"),
+            (
+                "structure_break_observations",
+                "result_id = NEW.result_id AND event_id = NEW.event_id",
+            ),
+        ):
+            for operation in ("UPDATE", "DELETE"):
+                connection.execute(
+                    f"""CREATE TRIGGER {table}_no_{operation.lower()}
+                    BEFORE {operation} ON {table}
+                    BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+                )
+            connection.execute(
+                f"""CREATE TRIGGER {table}_no_replace BEFORE INSERT ON {table}
+                WHEN EXISTS (SELECT 1 FROM {table} WHERE ({condition}) OR rowid = NEW.rowid)
+                BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+            )
+        for table, condition in (
+            ("study_events", "event_id = NEW.event_id"),
+            ("study_event_observations", "result_id = NEW.result_id AND event_id = NEW.event_id"),
+        ):
+            connection.execute(f"DROP TRIGGER {table}_no_replace")
+            connection.execute(
+                f"""CREATE TRIGGER {table}_no_replace BEFORE INSERT ON {table}
+                WHEN EXISTS (SELECT 1 FROM {table} WHERE ({condition}) OR rowid = NEW.rowid)
+                BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+            )
 
     def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
         """Phase 1B.3 schema: structured provenance and an explicit cache-format column."""
@@ -682,6 +751,8 @@ class SQLitePersistence:
 
     def save_study_result(self, result: StudyResult) -> None:
         """Atomically append a study result and all immutable event observations."""
+        if any(isinstance(event, StructureBreakEvent) for event in result.events):
+            validate_study_result(result)
         with self._connection() as connection:
             cursor = connection.execute(
                 """
@@ -717,6 +788,28 @@ class SQLitePersistence:
             if result_id is None:
                 raise RuntimeError("SQLite did not return the persisted study-result ID")
             for event in result.events:
+                if isinstance(event, StructureBreakEvent):
+                    row = connection.execute(
+                        f"SELECT {_BREAK_EVENT_COLUMNS} FROM structure_break_events "
+                        "WHERE event_id = ?",
+                        (event.event_id,),
+                    ).fetchone()
+                    if row is None:
+                        connection.execute(
+                            f"INSERT INTO structure_break_events ({_BREAK_EVENT_COLUMNS}) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            _break_event_values(event),
+                        )
+                    elif _break_event_from_row(row) != event:
+                        raise StudyEventConflictError(
+                            f"stored event {event.event_id} has a conflicting immutable payload"
+                        )
+                    connection.execute(
+                        "INSERT INTO structure_break_observations (result_id, event_id) "
+                        "VALUES (?, ?)",
+                        (result_id, event.event_id),
+                    )
+                    continue
                 row = connection.execute(
                     f"SELECT {_STUDY_EVENT_COLUMNS} FROM study_events WHERE event_id = ?",
                     (event.event_id,),
@@ -782,9 +875,20 @@ class SQLitePersistence:
                 """,
                 (row[0],),
             ).fetchall()
-        events = tuple(
-            sorted((_study_event_from_row(item) for item in event_rows), key=_study_event_order)
-        )
+            break_rows = connection.execute(
+                f"""
+                SELECT {_BREAK_EVENT_SELECT_COLUMNS}
+                FROM structure_break_events e
+                JOIN structure_break_observations o ON o.event_id = e.event_id
+                WHERE o.result_id = ?
+                """,
+                (row[0],),
+            ).fetchall()
+        all_events: list[StudyEvent | StructureBreakEvent] = [
+            *(_study_event_from_row(item) for item in event_rows),
+            *(_break_event_from_row(item) for item in break_rows),
+        ]
+        events = tuple(sorted(all_events, key=_study_event_order))
         return _study_result_from_row(row, events)
 
     def list_study_events(
@@ -810,6 +914,36 @@ class SQLitePersistence:
                 (study_id, version, instrument, timeframe),
             ).fetchall()
         events = (_study_event_from_row(row) for row in rows)
+        return tuple(
+            sorted(
+                (event for event in events if cutoff is None or event.known_at_utc <= cutoff),
+                key=_study_event_order,
+            )
+        )
+
+    def list_structure_break_events(
+        self,
+        study_id: str,
+        version: str,
+        instrument: str,
+        timeframe: str,
+        *,
+        known_at_or_before_utc: datetime | None = None,
+    ) -> tuple[StructureBreakEvent, ...]:
+        """Return persisted structure breaks in deterministic, cutoff-bound order."""
+        cutoff = None if known_at_or_before_utc is None else as_utc(known_at_or_before_utc)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT {_BREAK_EVENT_SELECT_COLUMNS}
+                FROM structure_break_events e
+                JOIN structure_break_observations o ON o.event_id = e.event_id
+                WHERE e.study_id = ? AND e.version = ? AND e.instrument = ?
+                  AND e.timeframe = ?
+                """,
+                (study_id, version, instrument, timeframe),
+            ).fetchall()
+        events = (_break_event_from_row(row) for row in rows)
         return tuple(
             sorted(
                 (event for event in events if cutoff is None or event.known_at_utc <= cutoff),
@@ -866,13 +1000,100 @@ def _study_event_values(event: StudyEvent) -> tuple[object, ...]:
     )
 
 
-def _study_event_order(event: StudyEvent) -> tuple[datetime, datetime, str, str]:
+def _study_event_order(
+    event: StudyEvent | StructureBreakEvent,
+) -> tuple[datetime, datetime, str, str]:
+    if isinstance(event, StructureBreakEvent):
+        return (
+            event.known_at_utc,
+            event.break_bar_time_utc,
+            event.classification.value,
+            event.event_id,
+        )
     return (
         event.known_at_utc,
         event.pivot_time_utc,
         event.event_type.value,
         event.event_id,
     )
+
+
+def _break_event_values(event: StructureBreakEvent) -> tuple[object, ...]:
+    return (
+        event.event_id,
+        event.study_id,
+        event.version,
+        event.instrument,
+        event.timeframe,
+        event.reference_swing_id,
+        event.broken_level,
+        _utc_isoformat(event.break_bar_time_utc),
+        _utc_isoformat(event.known_at_utc),
+        event.direction.value,
+        event.classification.value,
+        event.calendar_context_id,
+    )
+
+
+def _break_event_from_row(row: tuple[object, ...]) -> StructureBreakEvent:
+    try:
+        (
+            event_id,
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            reference,
+            level,
+            break_time,
+            known_at,
+            direction,
+            classification,
+            context,
+        ) = row
+        texts = (
+            event_id,
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            reference,
+            direction,
+            classification,
+            context,
+        )
+        if any(type(value) is not str for value in texts):
+            raise StoredStudyResultError("stored structure break text column has the wrong type")
+        if type(level) not in (int, float):
+            raise StoredStudyResultError("stored structure break level has the wrong type")
+        assert isinstance(event_id, str)
+        assert isinstance(study_id, str)
+        assert isinstance(version, str)
+        assert isinstance(instrument, str)
+        assert isinstance(timeframe, str)
+        assert isinstance(reference, str)
+        assert isinstance(level, (int, float))
+        assert isinstance(direction, str)
+        assert isinstance(classification, str)
+        assert isinstance(context, str)
+        return StructureBreakEvent(
+            event_id,
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            reference,
+            level,
+            parse_utc_z(break_time),
+            parse_utc_z(known_at),
+            Direction(direction),
+            StructureBreakType(classification),
+            context,
+        )
+    except StoredStudyResultError:
+        raise
+    except (TypeError, ValueError) as error:
+        raise StoredStudyResultError("stored structure break row is corrupt") from error
 
 
 def _study_event_from_row(row: tuple[object, ...]) -> StudyEvent:
@@ -956,7 +1177,7 @@ def as_utc(value: datetime) -> datetime:
 
 
 def _study_result_from_row(
-    row: tuple[object, ...], events: tuple[StudyEvent, ...] = ()
+    row: tuple[object, ...], events: tuple[StudyEvent | StructureBreakEvent, ...] = ()
 ) -> StudyResult:
     """Strictly rebuild a StudyResult; any violation raises StoredStudyResultError."""
     try:

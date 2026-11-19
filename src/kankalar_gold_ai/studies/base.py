@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 from fractions import Fraction
 from typing import NamedTuple, Protocol, TypeAlias, final, runtime_checkable
 
-from kankalar_gold_ai.core.contracts import Direction, MarketBar, StudyEvent, StudyStatus
+from kankalar_gold_ai.core.contracts import (
+    Direction,
+    MarketBar,
+    StructureBreakEvent,
+    StudyEvent,
+    StudyStatus,
+)
 from kankalar_gold_ai.studies.errors import StudyConfigError
 
 ConfigValue: TypeAlias = str | int | float | bool | None
@@ -155,9 +161,11 @@ def _string_tuple(name: str, values: object) -> tuple[str, ...]:
     return copied
 
 
-def _event_tuple(values: object) -> tuple[StudyEvent, ...]:
-    if type(values) is not tuple or any(type(value) is not StudyEvent for value in values):
-        raise ValueError("events must be an immutable tuple of StudyEvent values")
+def _event_tuple(values: object) -> tuple[StudyEvent | StructureBreakEvent, ...]:
+    if type(values) is not tuple or any(
+        type(value) not in (StudyEvent, StructureBreakEvent) for value in values
+    ):
+        raise ValueError("events must be an immutable tuple of study event values")
     return values
 
 
@@ -170,7 +178,7 @@ class _StudyOutputFields(NamedTuple):
     uncertainty: float | None
     evidence: tuple[str, ...]
     limitations: tuple[str, ...]
-    events: tuple[StudyEvent, ...]
+    events: tuple[StudyEvent | StructureBreakEvent, ...]
 
 
 @final
@@ -198,7 +206,7 @@ class StudyOutput(tuple[_StudyOutputFields]):
         uncertainty: float | None = None,
         evidence: tuple[str, ...] = (),
         limitations: tuple[str, ...] = (),
-        events: tuple[StudyEvent, ...] = (),
+        events: tuple[StudyEvent | StructureBreakEvent, ...] = (),
     ) -> StudyOutput:
         if not isinstance(status, StudyStatus) or status not in STUDY_OUTPUT_STATUSES:
             raise ValueError(f"study output status is not allowed: {status!r}")
@@ -261,7 +269,7 @@ class StudyOutput(tuple[_StudyOutputFields]):
         return self[0].limitations
 
     @property
-    def events(self) -> tuple[StudyEvent, ...]:
+    def events(self) -> tuple[StudyEvent | StructureBreakEvent, ...]:
         return self[0].events
 
     def __eq__(self, other: object) -> bool:

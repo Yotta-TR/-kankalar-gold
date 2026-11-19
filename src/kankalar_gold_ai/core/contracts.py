@@ -38,6 +38,12 @@ class StudyEventType(StrEnum):
     SWING_LOW = "SWING_LOW"
 
 
+class StructureBreakType(StrEnum):
+    INITIAL_BREAK = "INITIAL_BREAK"
+    BOS = "BOS"
+    CHOCH = "CHOCH"
+
+
 class StudyEventConflictError(RuntimeError):
     """A stable study-event identity was presented with a different payload."""
 
@@ -202,6 +208,91 @@ class StudyEvent:
             raise ValueError("event_id does not match the canonical event identity")
 
 
+def structure_break_event_id(
+    study_id: str,
+    version: str,
+    instrument: str,
+    timeframe: str,
+    reference_swing_id: str,
+    break_bar_time_utc: datetime,
+    calendar_context_id: str,
+) -> str:
+    """Return a stable identity scoped to the reference swing and calendar."""
+    if not _is_calendar_context_id(calendar_context_id):
+        raise ValueError("invalid calendar context identity")
+    fields = (
+        study_id,
+        version,
+        instrument,
+        timeframe,
+        reference_swing_id,
+        as_utc(break_bar_time_utc).isoformat().replace("+00:00", "Z"),
+        calendar_context_id,
+    )
+    canonical = json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
+    return f"structure-break-v1:sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+@dataclass(frozen=True, slots=True)
+class StructureBreakEvent:
+    """An immutable completed-close break of a previously confirmed swing."""
+
+    event_id: str
+    study_id: str
+    version: str
+    instrument: str
+    timeframe: str
+    reference_swing_id: str
+    broken_level: float
+    break_bar_time_utc: datetime
+    known_at_utc: datetime
+    direction: Direction
+    classification: StructureBreakType
+    calendar_context_id: str
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("event_id", self.event_id),
+            ("study_id", self.study_id),
+            ("version", self.version),
+            ("instrument", self.instrument),
+            ("timeframe", self.timeframe),
+            ("reference_swing_id", self.reference_swing_id),
+        ):
+            if type(value) is not str or not value:
+                raise ValueError(f"{name} must be a non-empty built-in string")
+        if type(self.direction) is not Direction or self.direction not in (
+            Direction.BULLISH,
+            Direction.BEARISH,
+        ):
+            raise ValueError("direction must be BULLISH or BEARISH")
+        if type(self.classification) is not StructureBreakType:
+            raise ValueError("classification must be a StructureBreakType")
+        if (
+            type(self.broken_level) not in (int, float)
+            or not math.isfinite(self.broken_level)
+            or self.broken_level <= 0
+        ):
+            raise ValueError("broken_level must be a finite positive built-in number")
+        bar_time = as_utc(self.break_bar_time_utc)
+        known_at = as_utc(self.known_at_utc)
+        if known_at <= bar_time:
+            raise ValueError("known_at_utc must be later than break_bar_time_utc")
+        object.__setattr__(self, "break_bar_time_utc", bar_time)
+        object.__setattr__(self, "known_at_utc", known_at)
+        object.__setattr__(self, "broken_level", float(self.broken_level))
+        if self.event_id != structure_break_event_id(
+            self.study_id,
+            self.version,
+            self.instrument,
+            self.timeframe,
+            self.reference_swing_id,
+            bar_time,
+            self.calendar_context_id,
+        ):
+            raise ValueError("event_id does not match the canonical structure-break identity")
+
+
 class DataStatus(StrEnum):
     VALID = "VALID"
     STALE = "STALE"
@@ -311,7 +402,7 @@ class StudyResult:
     limitations: tuple[str, ...]
     data_snapshot_id: str | None
     provenance: tuple[tuple[str, str], ...] = ()
-    events: tuple[StudyEvent, ...] = ()
+    events: tuple[StudyEvent | StructureBreakEvent, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of_utc", as_utc(self.as_of_utc))

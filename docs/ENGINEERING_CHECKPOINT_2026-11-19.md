@@ -155,3 +155,31 @@
 - BOS/CHoCH, zones, equal-level treatment, prominence, and other downstream
   structure choices remain **[TBD]**. No predictive value or trading approval
   is claimed. See ADR-020 and the study catalogue.
+
+## Phase 2D — 2026-11-19
+
+- Implemented `structure.bos_choch` v0.1.0, using confirmed swings known at
+  candle open and strictly crossed completed closes. The nearest crossed level
+  wins; equal-price ties use latest confirmation, then pivot and ID. All crossed
+  eligible levels are consumed. Bias starts unset and changes only on emitted
+  breaks; see ADR-021 for initial, continuation and reversal classifications.
+- Added frozen structure-break records, transactional schema v8, append-only
+  observations, cache round trips, payload-conflict rollback, and rowid-aware
+  replacement guards for both swing and break records. D1 completion uses the
+  validated calendar's timezone, with the existing fixed UTC fallback.
+- During the draft, a focused test initially imported the original checkout
+  through the editable environment instead of the isolated worktree; using
+  `PYTHONPATH=src` in the worktree fixes import resolution. Migration assertions
+  expecting schema 7 were updated to 8. Mypy originally inferred a mixed
+  expanded tuple as `object`; an explicitly typed union list preserves the
+  element type. A safety scan also rejected `getattr`; explicit field access
+  fixed it. The earlier cutoff fixture failed the quality gate before reaching
+  the cutoff gate; validation time is now set after completion to test the
+  intended boundary directly.
+- The result depends on the supplied history's start; keep it consistent when
+  replaying or extending a run. The implementation is descriptive research
+  only; zones, trading, and predictive claims remain out of scope.
+- Local validation on Python 3.14.2: 934 pytest tests passed; the explicit
+  safety subset passed 18 tests (22 deselected); Ruff lint and format, mypy
+  (53 source files), and working-tree whitespace checks passed. Python 3.11
+  and 3.12 require the separate CI matrix.
