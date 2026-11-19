@@ -6,6 +6,7 @@ deserialization can share one validator without importing each other's layers.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -13,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from kankalar_gold_ai.core.contracts import Direction, StudyResult, StudyStatus
+from kankalar_gold_ai.core.contracts import Direction, StudyEvent, StudyResult, StudyStatus
 
 CACHE_FORMAT_VERSION = "study-result-v1"
 
@@ -28,14 +29,26 @@ PROV_WINDOW_END = "input_window_end_utc"
 PROV_BAR_COUNT = "input_bar_count"
 PROV_SOURCE = "input_source"
 PROV_DATA_CHECKED = "data_checked_at_utc"
+PROV_CALENDAR_CONTEXT_ID = "calendar_context_id"
+PROV_CALENDAR_CONTEXT_JSON = "calendar_context_json"
 
 _WINDOW_KEYS = frozenset({PROV_WINDOW_START, PROV_WINDOW_END, PROV_BAR_COUNT, PROV_SOURCE})
 _ALLOWED_PROVENANCE_KEYS = (
-    frozenset({PROV_CACHE_FORMAT, PROV_STUDY_VERSION, PROV_DATA_CHECKED}) | _WINDOW_KEYS
+    frozenset(
+        {
+            PROV_CACHE_FORMAT,
+            PROV_STUDY_VERSION,
+            PROV_DATA_CHECKED,
+            PROV_CALENDAR_CONTEXT_ID,
+            PROV_CALENDAR_CONTEXT_JSON,
+        }
+    )
+    | _WINDOW_KEYS
 )
 
 _UTC_Z = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{6})?Z")
 _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*")
+_CALENDAR_CONTEXT_ID = re.compile(r"calendar-context-v1:sha256:[0-9a-f]{64}")
 
 
 class StudyResultValidationError(ValueError):
@@ -84,6 +97,7 @@ class StudyResultKey:
     inputs_json: str
     data_snapshot_id: str
     cache_format_version: str = CACHE_FORMAT_VERSION
+    calendar_context_id: str | None = None
 
     def __post_init__(self) -> None:
         for name, text in (
@@ -101,6 +115,14 @@ class StudyResultKey:
         _require(
             self.cache_format_version == CACHE_FORMAT_VERSION,
             "unsupported cache format version",
+        )
+        _require(
+            self.calendar_context_id is None
+            or (
+                type(self.calendar_context_id) is str
+                and _CALENDAR_CONTEXT_ID.fullmatch(self.calendar_context_id) is not None
+            ),
+            "calendar_context_id must be a valid calendar context identity or None",
         )
         object.__setattr__(self, "as_of_utc", parse_utc_z(utc_z(self.as_of_utc)))
 
@@ -129,6 +151,36 @@ def _validate_provenance(result: StudyResult) -> None:
     mapping = provenance_mapping(result.provenance)
     unknown = set(mapping) - _ALLOWED_PROVENANCE_KEYS
     _require(not unknown, f"unknown provenance keys: {sorted(unknown)}")
+    context_keys = {PROV_CALENDAR_CONTEXT_ID, PROV_CALENDAR_CONTEXT_JSON}
+    present_context = context_keys & set(mapping)
+    _require(
+        not present_context or present_context == context_keys,
+        "calendar context provenance requires both identity and canonical JSON",
+    )
+    if present_context:
+        context_id = mapping[PROV_CALENDAR_CONTEXT_ID]
+        context_json = mapping[PROV_CALENDAR_CONTEXT_JSON]
+        _require(
+            _CALENDAR_CONTEXT_ID.fullmatch(context_id) is not None,
+            "calendar_context_id is malformed",
+        )
+        try:
+            context_value = json.loads(context_json)
+        except (TypeError, ValueError) as error:
+            raise StudyResultValidationError("calendar_context_json is invalid") from error
+        _require(type(context_value) is dict, "calendar_context_json must contain a JSON object")
+        canonical_context = json.dumps(context_value, sort_keys=True, separators=(",", ":"))
+        _require(
+            canonical_context == context_json,
+            "calendar_context_json must be canonical",
+        )
+        expected_context_id = (
+            "calendar-context-v1:sha256:" + hashlib.sha256(context_json.encode("utf-8")).hexdigest()
+        )
+        _require(
+            context_id == expected_context_id,
+            "calendar context identity does not match its canonical JSON",
+        )
     _require(
         mapping.get(PROV_CACHE_FORMAT) == CACHE_FORMAT_VERSION,
         "provenance cache_format_version is missing or unsupported",
@@ -212,6 +264,22 @@ def validate_study_result(result: StudyResult) -> None:
             type(items) is tuple and all(type(item) is str for item in items),
             f"{name} must be a tuple of built-in strings",
         )
+    _require(
+        type(result.events) is tuple and all(type(event) is StudyEvent for event in result.events),
+        "events must be a tuple of StudyEvent values",
+    )
+    event_ids: set[str] = set()
+    for event in result.events:
+        _require(
+            (event.study_id, event.version, event.instrument, event.timeframe)
+            == (result.study_id, result.version, result.instrument, result.timeframe),
+            "study event identity must match its parent result",
+        )
+        _require(event.known_at_utc <= result.as_of_utc, "study event is not known at as_of_utc")
+        _require(event.event_id not in event_ids, "study result contains duplicate event IDs")
+        event_ids.add(event.event_id)
+    if result.events:
+        _require(result.status is StudyStatus.AVAILABLE, "events require an AVAILABLE result")
 
     if result.status is StudyStatus.AVAILABLE:
         _require(snapshot is not None, "AVAILABLE results require a data snapshot")

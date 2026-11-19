@@ -1,4 +1,4 @@
-"""SQLite schema v4, strict deserialization and cache-lookup tests (temporary databases)."""
+"""SQLite schema, strict deserialization and cache-lookup tests (temporary databases)."""
 
 from __future__ import annotations
 
@@ -94,6 +94,7 @@ def test_each_identity_component_changes_lookup(tmp_path: Path) -> None:
         {"as_of_utc": AS_OF + timedelta(minutes=15)},
         {"inputs_json": json.dumps({"period": 4})},
         {"data_snapshot_id": "bars-v1:sha256:" + "b" * 64},
+        {"calendar_context_id": "calendar-context-v1:sha256:" + "c" * 64},
     ):
         assert store.find_cached_study_result(_key(**changes)) is None
 
@@ -267,16 +268,16 @@ def _snapshot(path: Path) -> list[tuple[object, ...]]:
         ).fetchall()
 
 
-def test_v2_to_v4_migration_preserves_data_and_old_rows_are_not_hits(tmp_path: Path) -> None:
+def test_v2_to_v7_migration_preserves_data_and_old_rows_are_not_hits(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
     _v2_db(path)
     before = _snapshot(path)
     store = SQLitePersistence(path)
     store.initialize()
-    assert SQLitePersistence.SCHEMA_VERSION == 4
+    assert SQLitePersistence.SCHEMA_VERSION == 7
     assert _snapshot(path) == before
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 7
         row = connection.execute(
             "SELECT provenance_json, cache_format_version FROM study_results"
         ).fetchone()
@@ -321,6 +322,15 @@ def test_injected_v3_failure_rolls_back_to_v2(
 V3_MARKET_DATA_SCHEMA = """
 CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
 INSERT INTO schema_version VALUES (3);
+CREATE TABLE study_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    study_id TEXT NOT NULL, version TEXT NOT NULL, instrument TEXT NOT NULL,
+    timeframe TEXT NOT NULL, as_of_utc TEXT NOT NULL, status TEXT NOT NULL,
+    state TEXT, value REAL, normalized_value REAL, direction TEXT NOT NULL,
+    uncertainty REAL, inputs_json TEXT NOT NULL, evidence_json TEXT NOT NULL,
+    limitations_json TEXT NOT NULL, data_snapshot_id TEXT, provenance_json TEXT,
+    cache_format_version TEXT
+);
 CREATE TABLE market_ticks (
     instrument TEXT NOT NULL, timestamp_utc TEXT NOT NULL,
     timestamp_milliseconds INTEGER, bid REAL, ask REAL, last REAL, volume REAL,
@@ -351,14 +361,16 @@ def _v3_market_data_db(path: Path) -> None:
         connection.executescript(V3_MARKET_DATA_SCHEMA)
 
 
-def test_v3_to_v4_migration_preserves_market_data(tmp_path: Path) -> None:
+def test_v3_to_v7_migration_preserves_market_data(tmp_path: Path) -> None:
     path = tmp_path / "events.db"
     _v3_market_data_db(path)
 
     SQLitePersistence(path).initialize()
 
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone() == (4,)
+        assert connection.execute("SELECT version FROM schema_version").fetchone() == (7,)
+        study_columns = {r[1] for r in connection.execute("PRAGMA table_info(study_results)")}
+        assert "calendar_context_id" in study_columns
         tick = connection.execute(
             "SELECT instrument, timestamp_utc, bid, ask, source FROM market_ticks"
         ).fetchone()

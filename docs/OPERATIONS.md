@@ -27,10 +27,15 @@ errors are persisted as non-computing study results with status and stable
 source/reason evidence. Invalid requests and unclassified exceptions still
 raise. The helper is an offline integration seam; it does not initialize MT5.
 
-SQLite schema v4 upgrades quote and tick tables transactionally. Event identity
-excludes retrieval time: exact repeated events are rejected, while distinct
-updates sharing a timestamp are retained in insertion order. Persistence APIs
-are insert-only; direct edits to the database are not prevented by triggers.
+SQLite migrations through schema v7 are transactional. Schema v4 upgrades
+quote/tick event identity, schema v5 adds append-only study events and result
+observations, schema v6 indexes the calendar-context cache identity, and schema
+v7 blocks `INSERT OR REPLACE` from replacing existing study-event identities or
+observations. Event identity excludes retrieval time: exact repeated quote/tick
+events are rejected, while distinct updates sharing a timestamp are retained in
+insertion order. Persistence APIs are insert-only; triggers guard updates,
+deletes, and replacements on study-event tables, but do not prevent arbitrary
+direct edits to other database tables.
 
 Future integrations require bounded retries, supported timeouts, health
 reporting, idempotent jobs, graceful shutdown, and independently reviewed

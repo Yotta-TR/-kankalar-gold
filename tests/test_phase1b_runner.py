@@ -499,6 +499,7 @@ def test_runner_rejects_cache_hit_that_violates_key_or_contract(tmp_path: Path) 
         {"input_window_end_utc": "2026-01-01T00:10:00Z"},
         {"study_version": "2.0.0"},
         {"cache_format_version": "study-result-v0"},
+        {"calendar_context_id": "calendar-context-v1:sha256:" + "0" * 64},
     ],
 )
 def test_cache_hit_with_mismatched_provenance_is_rejected(

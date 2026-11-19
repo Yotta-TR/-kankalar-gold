@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -28,6 +31,60 @@ class Direction(StrEnum):
     BEARISH = "BEARISH"
     NEUTRAL = "NEUTRAL"
     NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class StudyEventType(StrEnum):
+    SWING_HIGH = "SWING_HIGH"
+    SWING_LOW = "SWING_LOW"
+
+
+class StudyEventConflictError(RuntimeError):
+    """A stable study-event identity was presented with a different payload."""
+
+
+_CALENDAR_CONTEXT_ID_PREFIX = "calendar-context-v1:sha256:"
+
+
+def _is_calendar_context_id(value: object) -> bool:
+    return (
+        type(value) is str
+        and value.startswith(_CALENDAR_CONTEXT_ID_PREFIX)
+        and len(value) == len(_CALENDAR_CONTEXT_ID_PREFIX) + 64
+        and all(character in "0123456789abcdef" for character in value[-64:])
+    )
+
+
+def study_event_id(
+    study_id: str,
+    version: str,
+    instrument: str,
+    timeframe: str,
+    event_type: StudyEventType,
+    pivot_time_utc: datetime,
+    left_bars: int,
+    right_bars: int,
+    calendar_context_id: str | None = None,
+) -> str:
+    """Return a deterministic ID for an event, optionally scoped to its calendar context."""
+    if calendar_context_id is not None and not _is_calendar_context_id(calendar_context_id):
+        raise ValueError("calendar_context_id must be a valid calendar context identity or None")
+    identity_fields = (
+        study_id,
+        version,
+        instrument,
+        timeframe,
+        event_type.value,
+        as_utc(pivot_time_utc).isoformat().replace("+00:00", "Z"),
+        left_bars,
+        right_bars,
+    )
+    identity = (
+        identity_fields if calendar_context_id is None else (*identity_fields, calendar_context_id)
+    )
+    canonical = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    event_id = f"study-event-v1:sha256:{digest}"
+    return event_id if calendar_context_id is None else f"{event_id}:{calendar_context_id}"
 
 
 class RiskOutcome(StrEnum):
@@ -72,6 +129,77 @@ class MarketBar:
             raise ValueError("bar OHLC values are inconsistent")
         if self.low > self.high:
             raise ValueError("bar low must not exceed high")
+
+
+@dataclass(frozen=True, slots=True)
+class StudyEvent:
+    """Immutable, point-in-time event emitted by a versioned study."""
+
+    event_id: str
+    study_id: str
+    version: str
+    instrument: str
+    timeframe: str
+    event_type: StudyEventType
+    pivot_time_utc: datetime
+    known_at_utc: datetime
+    price: float
+    left_bars: int
+    right_bars: int
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("event_id", self.event_id),
+            ("study_id", self.study_id),
+            ("version", self.version),
+            ("instrument", self.instrument),
+            ("timeframe", self.timeframe),
+        ):
+            if type(value) is not str or not value:
+                raise ValueError(f"{name} must be a non-empty built-in string")
+        if type(self.event_type) is not StudyEventType:
+            raise ValueError("event_type must be a StudyEventType")
+        pivot_time = as_utc(self.pivot_time_utc)
+        known_at = as_utc(self.known_at_utc)
+        if known_at <= pivot_time:
+            raise ValueError("known_at_utc must be later than pivot_time_utc")
+        if type(self.left_bars) is not int or self.left_bars <= 0:
+            raise ValueError("left_bars must be a positive built-in integer")
+        if type(self.right_bars) is not int or self.right_bars <= 0:
+            raise ValueError("right_bars must be a positive built-in integer")
+        if type(self.price) not in (int, float) or not math.isfinite(self.price) or self.price <= 0:
+            raise ValueError("price must be a finite positive built-in number")
+        object.__setattr__(self, "pivot_time_utc", pivot_time)
+        object.__setattr__(self, "known_at_utc", known_at)
+        object.__setattr__(self, "price", float(self.price))
+        expected_id = study_event_id(
+            self.study_id,
+            self.version,
+            self.instrument,
+            self.timeframe,
+            self.event_type,
+            pivot_time,
+            self.left_bars,
+            self.right_bars,
+        )
+        context_marker = ":calendar-context-v1:sha256:"
+        _, marker, context_digest = self.event_id.rpartition(context_marker)
+        context_id = f"calendar-context-v1:sha256:{context_digest}"
+        has_valid_context = bool(marker) and _is_calendar_context_id(context_id)
+        if has_valid_context:
+            has_valid_context = self.event_id == study_event_id(
+                self.study_id,
+                self.version,
+                self.instrument,
+                self.timeframe,
+                self.event_type,
+                pivot_time,
+                self.left_bars,
+                self.right_bars,
+                calendar_context_id=context_id,
+            )
+        if self.event_id != expected_id and not has_valid_context:
+            raise ValueError("event_id does not match the canonical event identity")
 
 
 class DataStatus(StrEnum):
@@ -183,6 +311,7 @@ class StudyResult:
     limitations: tuple[str, ...]
     data_snapshot_id: str | None
     provenance: tuple[tuple[str, str], ...] = ()
+    events: tuple[StudyEvent, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of_utc", as_utc(self.as_of_utc))

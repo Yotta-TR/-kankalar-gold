@@ -11,6 +11,8 @@ from kankalar_gold_ai.data.pipeline import HistoricalDataPipeline
 from kankalar_gold_ai.studies.base import (
     BarStudy,
     ConfigValue,
+    ContextualBarStudy,
+    StudyComputationContext,
     StudyOutput,
     validate_config_values,
 )
@@ -95,9 +97,12 @@ class RegisteredStudy:
         self,
         bars: tuple[MarketBar, ...],
         config: Mapping[str, object],
+        context: StudyComputationContext | None = None,
     ) -> StudyOutput:
         """Invoke the study with a read-only copy of flat validated configuration."""
         safe_config = validate_config_values(config)
+        if context is not None and isinstance(self.study, ContextualBarStudy):
+            return self.study.compute_with_context(bars, MappingProxyType(safe_config), context)
         return self.study.compute(bars, MappingProxyType(safe_config))
 
 
@@ -180,6 +185,12 @@ class StudyRegistry:
         _validate_method_signature("validate_config", validate_config, 1)
         _validate_method_signature("min_bars", min_bars, 1)
         _validate_method_signature("compute", compute, 2)
+        if isinstance(study, ContextualBarStudy):
+            _validate_method_signature(
+                "compute_with_context",
+                study.compute_with_context,
+                3,
+            )
 
         key = (study_id, version)
         if key in self._studies:

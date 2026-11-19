@@ -138,6 +138,7 @@ def cache_key(result: StudyResult) -> StudyResultKey:
         result.as_of_utc,
         canonical_inputs_json(result.inputs),
         result.data_snapshot_id,
+        calendar_context_id=dict(result.provenance)["calendar_context_id"],
     )
 
 

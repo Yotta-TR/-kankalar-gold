@@ -121,3 +121,37 @@
 - Added synthetic boundary, numerical, persistence, pipeline and no-lookahead
   checks, including runner-level RSI overflow regression. These studies are
   not trading signals or predictive claims; see ADR-019 and the catalogue.
+
+## Phase 2C — 2026-11-19
+
+- Implemented `structure.swings` v0.1.0 with required positive integer
+  `left_bars` and `right_bars`, strict unique extrema, independent high/low
+  evaluation, and delayed confirmation timestamps. A pivot timestamp is the
+  opening time of its candle; `known_at_utc` is the completion of its last
+  right-hand confirmation candle.
+- Added immutable typed event collections to study outputs/results and a
+  contextual runner hook carrying cutoff, timeframe, validated calendar
+  timezone and stable calendar identity, snapshot ID, and input-window
+  metadata. D1 confirmation uses local-day completion and therefore honors
+  23-, 24-, and 25-hour calendar days where applicable; without a calendar it
+  uses fixed 24-hour UTC days. Calendar-aware event IDs include the context
+  identity so different confirmation instants do not conflict in append-only
+  event storage.
+- SQLite schema v5 adds append-only study-event identities and result
+  observations. Event identities exclude retrieval/snapshot time. Result,
+  events, and observation links persist atomically; identical observations
+  reuse event identities and conflicting payloads fail closed. Cache hits
+  restore structured events. Schema v6 includes calendar identity in cache
+  lookups while keeping `data_snapshot_id` limited to bar data. Schema v7 adds
+  insert guards because SQLite `INSERT OR REPLACE` could otherwise bypass the
+  update/delete triggers; migration preserves existing event records.
+- Regression coverage confirms v6 databases gain the replacement guards and
+  that event identities and observation links reject replacement as well as
+  updates and deletes.
+- Post-review local validation (Python 3.14.2): `pytest -q` — 902 passed;
+  safety subset — 18 passed, 22 deselected; `ruff check .`, `ruff format
+  --check .`, `mypy src` (52 source files), and intended-diff whitespace
+  checks — passed.
+- BOS/CHoCH, zones, equal-level treatment, prominence, and other downstream
+  structure choices remain **[TBD]**. No predictive value or trading approval
+  is claimed. See ADR-020 and the study catalogue.

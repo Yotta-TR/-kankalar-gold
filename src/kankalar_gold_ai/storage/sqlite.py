@@ -16,12 +16,16 @@ from kankalar_gold_ai.core.contracts import (
     MarketQuote,
     MarketTick,
     SignalLifecycleEvent,
+    StudyEvent,
+    StudyEventConflictError,
+    StudyEventType,
     StudyResult,
     StudyStatus,
 )
 from kankalar_gold_ai.core.study_results import (
     CACHE_FORMAT_VERSION,
     PROV_CACHE_FORMAT,
+    PROV_CALENDAR_CONTEXT_ID,
     StudyResultKey,
     StudyResultValidationError,
     parse_utc_z,
@@ -39,9 +43,16 @@ class StoredStudyResultError(ValueError):
 
 
 _STUDY_RESULT_COLUMNS = (
-    "study_id, version, instrument, timeframe, as_of_utc, status, state, value, "
+    "id, study_id, version, instrument, timeframe, as_of_utc, status, state, value, "
     "normalized_value, direction, uncertainty, inputs_json, evidence_json, "
     "limitations_json, data_snapshot_id, provenance_json, cache_format_version"
+)
+_STUDY_EVENT_COLUMNS = (
+    "event_id, study_id, version, instrument, timeframe, event_type, "
+    "pivot_time_utc, known_at_utc, price, left_bars, right_bars"
+)
+_STUDY_EVENT_SELECT_COLUMNS = ", ".join(
+    f"e.{column}" for column in _STUDY_EVENT_COLUMNS.split(", ")
 )
 
 
@@ -52,7 +63,7 @@ def _reject_constant(name: str) -> object:
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 7
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -117,6 +128,9 @@ class SQLitePersistence:
                     2: self._migrate_to_version_2,
                     3: self._migrate_to_version_3,
                     4: self._migrate_to_version_4,
+                    5: self._migrate_to_version_5,
+                    6: self._migrate_to_version_6,
+                    7: self._migrate_to_version_7,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -284,6 +298,101 @@ class SQLitePersistence:
         connection.execute("DROP TABLE market_quotes")
         connection.execute("ALTER TABLE market_quotes_v4 RENAME TO market_quotes")
         connection.execute("CREATE INDEX idx_market_quotes_instrument ON market_quotes(instrument)")
+
+    def _migrate_to_version_5(self, connection: sqlite3.Connection) -> None:
+        """Add immutable study events and result-observation relationships."""
+        connection.execute(
+            """
+            CREATE TABLE study_events (
+                event_id TEXT PRIMARY KEY,
+                study_id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                pivot_time_utc TEXT NOT NULL,
+                known_at_utc TEXT NOT NULL,
+                price REAL NOT NULL,
+                left_bars INTEGER NOT NULL,
+                right_bars INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX idx_study_events_lookup ON study_events (
+                study_id, version, instrument, timeframe, known_at_utc, pivot_time_utc
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE study_event_observations (
+                result_id INTEGER NOT NULL REFERENCES study_results(id),
+                event_id TEXT NOT NULL REFERENCES study_events(event_id),
+                PRIMARY KEY (result_id, event_id)
+            )
+            """
+        )
+        for table in ("study_events", "study_event_observations"):
+            connection.execute(
+                f"""
+                CREATE TRIGGER {table}_no_update
+                BEFORE UPDATE ON {table}
+                BEGIN
+                    SELECT RAISE(ABORT, '{table} is append-only');
+                END
+                """
+            )
+            connection.execute(
+                f"""
+                CREATE TRIGGER {table}_no_delete
+                BEFORE DELETE ON {table}
+                BEGIN
+                    SELECT RAISE(ABORT, '{table} is append-only');
+                END
+                """
+            )
+
+    def _migrate_to_version_6(self, connection: sqlite3.Connection) -> None:
+        """Include calendar computation context in the persisted cache lookup identity."""
+        connection.execute("ALTER TABLE study_results ADD COLUMN calendar_context_id TEXT")
+        connection.execute(
+            """
+            CREATE INDEX idx_study_results_cache_calendar ON study_results (
+                study_id, version, instrument, timeframe, as_of_utc,
+                data_snapshot_id, inputs_json, calendar_context_id, cache_format_version
+            )
+            """
+        )
+
+    def _migrate_to_version_7(self, connection: sqlite3.Connection) -> None:
+        """Prevent SQLite REPLACE from bypassing append-only event triggers."""
+        connection.execute(
+            """
+            CREATE TRIGGER study_events_no_replace
+            BEFORE INSERT ON study_events
+            WHEN EXISTS (
+                SELECT 1 FROM study_events WHERE event_id = NEW.event_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'study_events is append-only');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER study_event_observations_no_replace
+            BEFORE INSERT ON study_event_observations
+            WHEN EXISTS (
+                SELECT 1 FROM study_event_observations
+                WHERE result_id = NEW.result_id AND event_id = NEW.event_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'study_event_observations is append-only');
+            END
+            """
+        )
 
     def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
         """Phase 1B.3 schema: structured provenance and an explicit cache-format column."""
@@ -572,16 +681,16 @@ class SQLitePersistence:
             )
 
     def save_study_result(self, result: StudyResult) -> None:
-        """Append one complete study result, preserving evidence and limitations."""
+        """Atomically append a study result and all immutable event observations."""
         with self._connection() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO study_results (
                     study_id, version, instrument, timeframe, as_of_utc, status, state,
                     value, normalized_value, direction, uncertainty, inputs_json,
                     evidence_json, limitations_json, data_snapshot_id,
-                    provenance_json, cache_format_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    provenance_json, cache_format_version, calendar_context_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.study_id,
@@ -601,8 +710,36 @@ class SQLitePersistence:
                     result.data_snapshot_id,
                     json.dumps(dict(result.provenance), sort_keys=True),
                     dict(result.provenance).get(PROV_CACHE_FORMAT),
+                    dict(result.provenance).get(PROV_CALENDAR_CONTEXT_ID),
                 ),
             )
+            result_id = cursor.lastrowid
+            if result_id is None:
+                raise RuntimeError("SQLite did not return the persisted study-result ID")
+            for event in result.events:
+                row = connection.execute(
+                    f"SELECT {_STUDY_EVENT_COLUMNS} FROM study_events WHERE event_id = ?",
+                    (event.event_id,),
+                ).fetchone()
+                if row is None:
+                    connection.execute(
+                        f"""
+                        INSERT INTO study_events ({_STUDY_EVENT_COLUMNS})
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        _study_event_values(event),
+                    )
+                elif _study_event_from_row(row) != event:
+                    raise StudyEventConflictError(
+                        f"stored event {event.event_id} has a conflicting immutable payload"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO study_event_observations (result_id, event_id)
+                    VALUES (?, ?)
+                    """,
+                    (result_id, event.event_id),
+                )
 
     def find_cached_study_result(self, key: StudyResultKey) -> StudyResult | None:
         """Return the newest cache-eligible row for the exact key, or None.
@@ -617,7 +754,7 @@ class SQLitePersistence:
                 SELECT {_STUDY_RESULT_COLUMNS} FROM study_results
                 WHERE study_id = ? AND version = ? AND instrument = ? AND timeframe = ?
                   AND as_of_utc = ? AND data_snapshot_id = ? AND inputs_json = ?
-                  AND cache_format_version = ?
+                  AND cache_format_version = ? AND calendar_context_id IS ?
                   AND status IN ('AVAILABLE', 'INSUFFICIENT_DATA', 'UNAVAILABLE')
                 ORDER BY id DESC LIMIT 1
                 """,
@@ -630,11 +767,55 @@ class SQLitePersistence:
                     key.data_snapshot_id,
                     key.inputs_json,
                     key.cache_format_version,
+                    key.calendar_context_id,
                 ),
             ).fetchone()
-        if row is None:
-            return None
-        return _study_result_from_row(row)
+            if row is None:
+                return None
+            event_rows = connection.execute(
+                f"""
+                SELECT {_STUDY_EVENT_SELECT_COLUMNS}
+                FROM study_events e
+                JOIN study_event_observations o ON o.event_id = e.event_id
+                WHERE o.result_id = ?
+                ORDER BY e.known_at_utc, e.pivot_time_utc, e.event_type, e.event_id
+                """,
+                (row[0],),
+            ).fetchall()
+        events = tuple(
+            sorted((_study_event_from_row(item) for item in event_rows), key=_study_event_order)
+        )
+        return _study_result_from_row(row, events)
+
+    def list_study_events(
+        self,
+        study_id: str,
+        version: str,
+        instrument: str,
+        timeframe: str,
+        *,
+        known_at_or_before_utc: datetime | None = None,
+    ) -> tuple[StudyEvent, ...]:
+        """Return persisted events in deterministic order, optionally cutoff-bound."""
+        cutoff = None if known_at_or_before_utc is None else as_utc(known_at_or_before_utc)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT {_STUDY_EVENT_SELECT_COLUMNS}
+                FROM study_events e
+                JOIN study_event_observations o ON o.event_id = e.event_id
+                WHERE e.study_id = ? AND e.version = ? AND e.instrument = ?
+                  AND e.timeframe = ?
+                """,
+                (study_id, version, instrument, timeframe),
+            ).fetchall()
+        events = (_study_event_from_row(row) for row in rows)
+        return tuple(
+            sorted(
+                (event for event in events if cutoff is None or event.known_at_utc <= cutoff),
+                key=_study_event_order,
+            )
+        )
 
     def save_signal_event(self, event: SignalLifecycleEvent) -> None:
         """Append one lifecycle event; duplicate event ids are rejected."""
@@ -657,6 +838,7 @@ class SQLitePersistence:
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         with closing(sqlite3.connect(self._path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
             with connection:
                 yield connection
 
@@ -666,6 +848,83 @@ def _utc_isoformat(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _study_event_values(event: StudyEvent) -> tuple[object, ...]:
+    return (
+        event.event_id,
+        event.study_id,
+        event.version,
+        event.instrument,
+        event.timeframe,
+        event.event_type.value,
+        _utc_isoformat(event.pivot_time_utc),
+        _utc_isoformat(event.known_at_utc),
+        event.price,
+        event.left_bars,
+        event.right_bars,
+    )
+
+
+def _study_event_order(event: StudyEvent) -> tuple[datetime, datetime, str, str]:
+    return (
+        event.known_at_utc,
+        event.pivot_time_utc,
+        event.event_type.value,
+        event.event_id,
+    )
+
+
+def _study_event_from_row(row: tuple[object, ...]) -> StudyEvent:
+    try:
+        (
+            event_id,
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            event_type,
+            pivot_time,
+            known_at,
+            price,
+            left_bars,
+            right_bars,
+        ) = row
+        text_values = (event_id, study_id, version, instrument, timeframe, event_type)
+        if any(type(value) is not str for value in text_values):
+            raise StoredStudyResultError("stored study event text column has the wrong type")
+        assert isinstance(event_id, str)
+        assert isinstance(study_id, str)
+        assert isinstance(version, str)
+        assert isinstance(instrument, str)
+        assert isinstance(timeframe, str)
+        assert isinstance(event_type, str)
+        if (
+            isinstance(price, bool)
+            or not isinstance(price, (int, float))
+            or type(left_bars) is not int
+            or type(right_bars) is not int
+        ):
+            raise StoredStudyResultError("stored study event numeric column has the wrong type")
+        assert isinstance(left_bars, int)
+        assert isinstance(right_bars, int)
+        return StudyEvent(
+            event_id=event_id,
+            study_id=study_id,
+            version=version,
+            instrument=instrument,
+            timeframe=timeframe,
+            event_type=StudyEventType(event_type),
+            pivot_time_utc=parse_utc_z(pivot_time),
+            known_at_utc=parse_utc_z(known_at),
+            price=price,
+            left_bars=left_bars,
+            right_bars=right_bars,
+        )
+    except StoredStudyResultError:
+        raise
+    except (TypeError, ValueError) as error:
+        raise StoredStudyResultError("stored study event row is corrupt") from error
 
 
 def _event_identity_hash(values: tuple[object, ...], *, float_positions: tuple[int, ...]) -> str:
@@ -696,10 +955,13 @@ def as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _study_result_from_row(row: tuple[object, ...]) -> StudyResult:
+def _study_result_from_row(
+    row: tuple[object, ...], events: tuple[StudyEvent, ...] = ()
+) -> StudyResult:
     """Strictly rebuild a StudyResult; any violation raises StoredStudyResultError."""
     try:
         (
+            row_id,
             study_id,
             version,
             instrument,
@@ -718,6 +980,8 @@ def _study_result_from_row(row: tuple[object, ...]) -> StudyResult:
             provenance_json,
             cache_format,
         ) = row
+        if type(row_id) is not int:
+            raise StoredStudyResultError("stored result ID has the wrong type")
         for text in (inputs_json, evidence_json, limitations_json, provenance_json):
             if type(text) is not str:
                 raise StoredStudyResultError("stored JSON column is missing or not text")
@@ -758,6 +1022,7 @@ def _study_result_from_row(row: tuple[object, ...]) -> StudyResult:
             limitations=tuple(limitations),
             data_snapshot_id=snapshot_id,  # type: ignore[arg-type]
             provenance=provenance_pairs,
+            events=events,
         )
         validate_study_result(result)
     except StoredStudyResultError:

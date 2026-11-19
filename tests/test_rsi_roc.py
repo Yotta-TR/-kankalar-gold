@@ -202,6 +202,7 @@ def test_timeframe_cache_and_round_trip(
         CUTOFF,
         canonical_inputs_json(result.inputs),
         result.data_snapshot_id,
+        calendar_context_id=dict(result.provenance)["calendar_context_id"],
     )
     assert store.find_cached_study_result(cache_key) == result
     other = run(runner, study, items, 3)
@@ -215,6 +216,7 @@ def test_timeframe_cache_and_round_trip(
         CUTOFF,
         canonical_inputs_json(other.inputs),
         other.data_snapshot_id,
+        calendar_context_id=dict(other.provenance)["calendar_context_id"],
     )
     reopened = SQLitePersistence(tmp_path / "momentum.db")
     assert reopened.find_cached_study_result(other_key) == other
