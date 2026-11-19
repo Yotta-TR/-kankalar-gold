@@ -89,8 +89,10 @@ provider overreach is rejected (ADR-008). Use `retrieve_validated_bars` for
 studies; `retrieve_bars` returns a raw tuple without cutoff provenance.
 `run_pipeline_study` connects retrieval and study execution, mapping typed data
 and provider failures to persisted non-computing study results. The
-`volatility.atr`, `trend.ma_slope_order`, and `trend.adx_dm` studies and
-independent multi-timeframe coordination are descriptive research tools.
+`volatility.atr`, `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, and
+`trend.roc_momentum` studies and independent multi-timeframe coordination are
+descriptive research tools, not validated trading strategies. RSI describes
+its own movement, not a market regime; each ROC run uses one explicit horizon.
 Strategies and runner scheduling remain unimplemented.
 
 The MT5 adapter has bounded connection/history retries and a timeout for

@@ -351,3 +351,15 @@
   access failures.
 - **Scope:** This bridge does not add retries to studies, suppress invalid
   request/configuration errors, or make multi-component persistence atomic.
+
+## ADR-018: Descriptive RSI and single-horizon ROC
+
+- **Decision:** Implement Wilder RSI level and one-completed-bar change and
+  percentage ROC, with explicit periods and formula version 0.1.0. RSI requires
+  `period + 2` bars and ROC `period + 1`; exact formulas and zero policies are
+  specified in the study catalogue.
+- **Consequences:** Each run uses validated completed bars from one timeframe.
+  ROC horizons use distinct configurations and cache keys, without an assumed
+  normalization. RSI direction describes RSI movement, not market regime or
+  overbought/oversold status. Both are descriptive, not validated strategies;
+  arithmetic failures use the runner's fail-closed error path.
