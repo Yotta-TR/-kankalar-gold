@@ -1,5 +1,31 @@
 # Architecture Decisions
 
+## ADR-023: Point-in-time liquidity sweep descriptions (Phase 2F)
+
+- **Decision:** `structure.liquidity_sweep` v0.1.0 requires explicit positive
+  swing windows, zone lookback/tolerance and `min_sweep_bps`. Its warm-up is
+  the zone minimum plus one completed candle. At each candle open, construct
+  the same zones as `structure.sr_zones` from that prefix's pivot lookback and
+  swings confirmed by the open. Previously persisted but no longer present
+  zones are not independently treated as active. The supplied history start
+  can affect zone membership.
+- **Detection:** On resistance require previous close at or below upper bound,
+  a high strictly above it, overshoot at least the threshold relative to the
+  bound, and completed close at or below it. On support reverse these
+  comparisons using the lower bound and low. Compare decimal representations
+  exactly; a close beyond the bound is not a sweep. Per side select the
+  nearest eligible level from the previous close, then the latest zone
+  confirmation and lexicographically greatest zone ID. Record both sides
+  independently without asserting intrabar order; later candles are distinct.
+- **Storage:** Frozen sweep records embed the referenced immutable zone and
+  store its ID with a foreign key. Schema v10 atomically stores reference zones,
+  sweep records and result observations, with append-only and rowid-aware
+  replacement guards. IDs include the zone, candle, study, market and threshold;
+  conflicting candle payloads for an existing identity fail closed. D1 event
+  completion follows the validated calendar, including DST.
+- **Scope:** Descriptive only, with no volume strength, recommendation,
+  predictive assertion or inference of intrabar order.
+
 ## ADR-022: Confirmed-swing support and resistance zones (Phase 2E)
 
 - **Decision:** `structure.sr_zones` v0.1.0 requires explicit positive

@@ -17,6 +17,7 @@ from kankalar_gold_ai.studies.errors import (
     StudyRequestError,
     UnknownStudyError,
 )
+from kankalar_gold_ai.studies.liquidity_sweep import LiquiditySweepStudy
 from kankalar_gold_ai.studies.multitimeframe import (
     AnalysisCompleteness,
     CalendarAwareFreshnessPolicy,
@@ -55,6 +56,7 @@ __all__ = [
     "DuplicateStudyError",
     "FreshnessPolicy",
     "InvalidStudyError",
+    "LiquiditySweepStudy",
     "MultiTimeframeAnalysisCoordinator",
     "MultiTimeframeAnalysisRequest",
     "MultiTimeframeAnalysisResult",

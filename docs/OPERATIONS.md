@@ -27,7 +27,7 @@ errors are persisted as non-computing study results with status and stable
 source/reason evidence. Invalid requests and unclassified exceptions still
 raise. The helper is an offline integration seam; it does not initialize MT5.
 
-SQLite migrations through schema v9 are transactional. Schema v4 upgrades
+SQLite migrations through schema v10 are transactional. Schema v4 upgrades
 quote/tick event identity, schema v5 adds append-only study events and result
 observations, schema v6 indexes the calendar-context cache identity, and schema
 v7 blocks `INSERT OR REPLACE` on matching study-event identities or
@@ -52,6 +52,18 @@ detection may use earlier bars outside that window. Provide at least the
 lookback count and the swing warm-up. Retain the same history start and calendar
 context for reproducibility. Volume-based strength is unavailable and
 unimplemented; no zone is a signal or trading recommendation.
+
+Register `LiquiditySweepStudy` and supply all zone parameters plus positive,
+finite `min_sweep_bps`. Use `StudyRunner` or `run_pipeline_study` with validated
+completed bars. The minimum history is the zone warm-up plus one bar. Zones are
+reconstructed for each candle open using only then-confirmed swings and that
+open's lookback; retain the same history start and calendar context for replay.
+Schema v10 atomically persists the referenced zone, sweep records and result
+observations with update/delete/replacement and rowid guards. A conflicting
+immutable candle payload fails the write. D1 timing uses the supplied calendar.
+Sweep computation scans the supplied history and zone lookback; long histories
+and large lookbacks increase computation. No volume strength, prediction,
+intrabar ordering or trading recommendation is provided.
 
 Register `BosChochStudy` with `StudyRegistry` and use `StudyRunner` or
 `run_pipeline_study` with explicit positive `left_bars` and `right_bars`.

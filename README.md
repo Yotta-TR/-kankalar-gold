@@ -6,7 +6,7 @@ gold research. No trading logic or order execution is implemented.
 Phase 1A completes market-data contracts, offline quality checks, injectable
 read-only MT5 adapter, configuration-based provider selection, historical
 coverage validation, and an append-oriented versioned SQLite persistence layer
-(schema v9).
+(schema v10).
 Comprehensive testing with deterministic synthetic data verifies all components.
 This is research-only software; do not use for live market analysis.
 
@@ -91,7 +91,7 @@ studies; `retrieve_bars` returns a raw tuple without cutoff provenance.
 and provider failures to persisted non-computing study results. The
 `volatility.atr`, `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, and
 `trend.roc_momentum`, `trend.macd`, `trend.donchian`, `structure.swings`,
-`structure.bos_choch`, and `structure.sr_zones`
+`structure.bos_choch`, `structure.sr_zones`, and `structure.liquidity_sweep`
 studies and independent multi-timeframe coordination are
 descriptive research tools, not validated trading strategies. RSI describes
 its own movement, not a market regime; each ROC run uses one explicit horizon.
@@ -122,6 +122,12 @@ Each zone requires at least two swings; its full price range must fit the
 tolerance measured from its lowest member. Schema v9 stores immutable zone
 records and observations. A membership change produces a new identity.
 Volume-based strength is unavailable and unimplemented; zones are descriptive.
+`structure.liquidity_sweep` v0.1.0 describes completed wick penetrations and
+reclaims of support or resistance zones known at the candle open. All swing,
+zone and minimum-overshoot parameters are explicit. Both sides can be recorded
+independently, without inferring their intrabar order. Schema v10 persists
+immutable sweep events and their referenced zones; these observations are not
+predictive, directional trade recommendations or signals.
 Strategies and runner scheduling remain unimplemented.
 
 The MT5 adapter has bounded connection/history retries and a timeout for
