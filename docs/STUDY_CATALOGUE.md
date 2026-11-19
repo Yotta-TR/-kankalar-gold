@@ -2,8 +2,8 @@
 
 Status: This catalogue documents research candidates. `volatility.atr`,
 `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, `trend.roc_momentum`,
-`trend.macd`, `trend.donchian`, `structure.swings`, `structure.bos_choch`, and
-`structure.sr_zones`
+`trend.macd`, `trend.donchian`, `structure.swings`, `structure.bos_choch`,
+`structure.sr_zones`, and `structure.liquidity_sweep`
 are implemented as descriptive studies; listing or implementation does not imply predictive approval or
 ensemble activation.
 This catalogue organizes the research candidates of Sections 5.1–5.6 of
@@ -75,7 +75,7 @@ Checked against the repository (not assumed):
 | Quotes and ticks | `validate_quote` reports non-finite/crossed/non-positive bid/ask, future or stale timestamps, inconsistent milliseconds, invalid last, and excessive spread. The MT5 adapter validates tick timestamp/range, finite and non-negative price values, bid/ask ordering, flags, changed-field consistency, exact duplicate records, and out-of-order events; distinct updates sharing a timestamp are preserved. Empty tick history has a typed missing-data error. Quotes and ticks still do not pass through a shared `ValidatedQuote`/`ValidatedTick` study pipeline; quote freshness/spread thresholds must be explicitly checked by the caller **[TBD]**. |
 | Instrument | The logical project identity is `GOLD_USD` [SPEC §19]; the broker symbol is `null` until discovered and confirmed from MT5 [SPEC §19]. It is commonly labelled XAUUSD, but the exact symbol is unresolved. |
 | Gap semantics (`data/calendar.py`, `data/quality.py`) | Gaps are classified with an explicit broker/instrument calendar. Known closures are retained as valid-quality diagnostics, open-session missing bars and unknown calendar coverage fail closed. The typed calendar contract has no broker schedule or timezone defaults; all calendar tests use synthetic schedules. |
-| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON. Schema v3 adds provenance; v4 rebuilds quote/tick identities; v5 adds immutable swing events and observations; v6 adds calendar-context cache identity; v7 blocks identity-based replacement; v8 adds structure-break events and observations and rowid replacement guards; v9 adds immutable zones and observations. `find_cached_study_result` validates the newest eligible row using the full cache key. Migrations and each write batch are transactional. Current schema version 9. |
+| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON. Schema v3 adds provenance; v4 rebuilds quote/tick identities; v5 adds immutable swing events and observations; v6 adds calendar-context cache identity; v7 blocks identity-based replacement; v8 adds structure-break events and observations and rowid replacement guards; v9 adds immutable zones and observations; v10 adds immutable sweeps and observations. `find_cached_study_result` validates the newest eligible row using the full cache key. Migrations and each write batch are transactional. Current schema version 10. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
 | Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. |
 | Pipeline failure integration | `studies.pipeline_execution.run_pipeline_study` runs only validated bars; known quality, empty-history, and typed provider failures become persisted non-computing `StudyResult`s with status/reason/source evidence. Other request/programming errors still propagate. |
@@ -483,7 +483,8 @@ predictive contribution. `trend.atr_trend` additionally depends on the ATR study
 Common to the group: priority **STRUCTURE**; input: closed OHLC bars (verified broker gold instrument; exact symbol to be
 discovered via MT5); the spec requires every concept to have *an operational definition, a
 detection algorithm, and out-of-sample results* [SPEC §5.2]. `structure.swings`,
-`structure.bos_choch` and `structure.sr_zones` are defined below; other unimplemented rules remain **[TBD]**.
+`structure.bos_choch`, `structure.sr_zones` and `structure.liquidity_sweep` are
+defined below; other unimplemented rules remain **[TBD]**.
 Type: *descriptive/contextual*. Principal risks: repainting (swings are only known after
 confirmation), subjective definitions, session-boundary ambiguity, and
 session/calendar dependence (C1, only for session-dependent studies).
@@ -496,7 +497,7 @@ session/calendar dependence (C1, only for session-dependent studies).
 | `structure.range_failed_breakout` | Range boundaries and failed breakouts | Named only | Range and failure definitions **[TBD]** |
 | `structure.session_levels` | Opening range and session highs/lows | Named only | Session definitions, time zones, DST **[TBD]**; needs C1 |
 | `structure.gaps_fvg` | Gap and imbalance descriptors, including Fair Value Gap candidates | "with precise candle definitions" | Candle definition **[TBD]**; gaps must not be confused with weekend/closure data absence |
-| `structure.liquidity_sweep` | Liquidity sweep hypotheses around prior highs/lows and equal highs/lows | Described as "hypotheses" | Level, "equal" tolerance, sweep criteria **[TBD]** |
+| `structure.liquidity_sweep` | Liquidity sweep hypotheses around prior highs/lows and equal highs/lows | Described as "hypotheses" | v0.1.0 uses confirmed swing zones and completed wick reclaims; alternate sweep definitions remain **[TBD]** |
 | `structure.candlestick_patterns` | Candlestick patterns | "only where each pattern is formally defined and independently tested" | One sub-study per pattern; none selected **[TBD]** |
 
 Common details: warm-up and definitions for unimplemented studies remain **[TBD]**; data-quality dependency: contiguous `VALID`
@@ -507,6 +508,32 @@ boundary candles, equal-level tolerance edge cases, missing bars,
 no-lookahead; out-of-sample: §4.6. Prerequisites: core F1–F5; C1 only for
 `structure.session_levels` (and any other session-dependent definition adopted
 later); BOS/CHoCH and zones depend on swings; D1/D2 as in §5.1 tier C.
+
+### `structure.liquidity_sweep` v0.1.0
+
+- Requires explicit positive `left_bars`, `right_bars`, `lookback_bars`,
+  `tolerance_bps` and `min_sweep_bps`; warm-up is the zone minimum plus one
+  candle. Reconstruct the zone-study output at each candle's open, using the
+  prefix's lookback and only swings confirmed by that open. Final-window zones
+  and previously persisted zones that are absent from this prefix are not
+  substituted for the historical zone set.
+- A high-side event requires previous close <= resistance upper bound, high
+  strictly above it, and close <= the bound. A low-side event requires previous
+  close >= support lower bound, low strictly below it, and close >= the bound.
+  Overshoot, relative to the bound in basis points, must be >= the configured
+  threshold using exact decimal-representation comparisons. A close outside
+  the bound is a breakout candidate, not a sweep.
+- Per side, choose the nearest qualifying level from the previous close, then
+  latest zone confirmation, then greatest stable zone ID. Both sides can occur
+  on the same candle without implied intrabar ordering; later sweeps are distinct.
+  Each immutable event contains the referenced immutable zone, wick, previous
+  and current closes, open and completion times, side and threshold. Schema v10
+  persists zone references, events and observations atomically; cache hits restore
+  them. D1 completion respects the validated calendar and DST.
+- These are descriptive hypotheses, not predictive claims, signals or trade
+  recommendations. Volume-based strength is unavailable and unimplemented.
+  Alternate equal-level and sweep rules, lifecycle, ranking, and out-of-sample
+  validation remain **[TBD]**.
 
 ### `structure.sr_zones` v0.1.0
 

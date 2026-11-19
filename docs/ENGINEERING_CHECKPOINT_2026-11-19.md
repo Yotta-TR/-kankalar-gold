@@ -1,5 +1,20 @@
 # Engineering checkpoint — 2026-11-19
 
+## Phase 2F
+
+- Added descriptive `structure.liquidity_sweep` v0.1.0 with explicit swing,
+  zone and minimum overshoot configuration. Each candle uses only zone membership
+  available at its open; completed wick reclaims are selected independently
+  per side, without inferred intrabar order or volume-based strength.
+- Added immutable sweep events, referenced zone storage, transactional schema
+  v10, cache restoration and append-only/rowid replacement guards. Synthetic
+  tests cover point-in-time selection, D1 DST, migrations and pipeline safety.
+- Alternative structural definitions and predictive validation remain TBD.
+  No trading signal or recommendation is added.
+- Local Python 3.14.2: 984 tests passed; the safety subset passed 18 tests
+  (22 deselected). Ruff lint/format, mypy and diff checks passed;
+  Python 3.11 and 3.12 require CI verification.
+
 ## Phase 2E
 
 - Added descriptive `structure.sr_zones` v0.1.0, with explicit swing windows,

@@ -50,6 +50,11 @@ class StructureZoneType(StrEnum):
     RESISTANCE = "RESISTANCE"
 
 
+class StructureSweepSide(StrEnum):
+    HIGH_SIDE = "HIGH_SIDE"
+    LOW_SIDE = "LOW_SIDE"
+
+
 class StudyEventConflictError(RuntimeError):
     """A stable study-event identity was presented with a different payload."""
 
@@ -412,6 +417,107 @@ class StructureZone:
             raise ValueError("event_id does not match the canonical structure-zone identity")
 
 
+def structure_sweep_event_id(
+    study_id: str,
+    version: str,
+    instrument: str,
+    timeframe: str,
+    reference_zone_id: str,
+    sweep_bar_time_utc: datetime,
+    min_sweep_bps: float,
+) -> str:
+    """Identify a sweep by its zone, candle, study, market and threshold."""
+    fields = (
+        study_id,
+        version,
+        instrument,
+        timeframe,
+        reference_zone_id,
+        as_utc(sweep_bar_time_utc).isoformat().replace("+00:00", "Z"),
+        float(min_sweep_bps),
+    )
+    canonical = json.dumps(fields, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return f"structure-sweep-v1:sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+@dataclass(frozen=True, slots=True)
+class StructureSweepEvent:
+    """Immutable completed-candle wick reclaim of a previously known zone."""
+
+    event_id: str
+    study_id: str
+    version: str
+    instrument: str
+    timeframe: str
+    reference_zone: StructureZone
+    side: StructureSweepSide
+    sweep_bar_time_utc: datetime
+    known_at_utc: datetime
+    previous_close: float
+    wick_price: float
+    close: float
+    min_sweep_bps: float
+
+    def __post_init__(self) -> None:
+        for value in (self.event_id, self.study_id, self.version, self.instrument, self.timeframe):
+            if type(value) is not str or not value:
+                raise ValueError("sweep identity fields must be non-empty built-in strings")
+        if type(self.reference_zone) is not StructureZone:
+            raise ValueError("reference_zone must be a StructureZone")
+        zone = self.reference_zone
+        if (
+            zone.study_id != "structure.sr_zones"
+            or zone.version != "0.1.0"
+            or (zone.instrument, zone.timeframe) != (self.instrument, self.timeframe)
+        ):
+            raise ValueError("reference zone must match the sweep market and zone study")
+        if type(self.side) is not StructureSweepSide:
+            raise ValueError("side must be a StructureSweepSide")
+        bar_time, known_at = as_utc(self.sweep_bar_time_utc), as_utc(self.known_at_utc)
+        if known_at <= bar_time or zone.known_at_utc > bar_time:
+            raise ValueError("sweep must follow zone confirmation and complete after its open")
+        for number in (self.previous_close, self.wick_price, self.close, self.min_sweep_bps):
+            if type(number) not in (int, float) or not math.isfinite(number) or number <= 0:
+                raise ValueError("sweep prices and threshold must be finite positive numbers")
+        previous, wick, close, threshold = map(
+            float, (self.previous_close, self.wick_price, self.close, self.min_sweep_bps)
+        )
+        if self.side is StructureSweepSide.HIGH_SIDE:
+            level = zone.upper_price
+            valid = (
+                zone.zone_type is StructureZoneType.RESISTANCE
+                and previous <= level < wick
+                and close <= level
+            )
+            overshoot = Fraction(str(wick)) - Fraction(str(level))
+        else:
+            level = zone.lower_price
+            valid = (
+                zone.zone_type is StructureZoneType.SUPPORT
+                and previous >= level > wick
+                and close >= level
+            )
+            overshoot = Fraction(str(level)) - Fraction(str(wick))
+        if not valid or overshoot * 10000 < Fraction(str(level)) * Fraction(str(threshold)):
+            raise ValueError("sweep must penetrate and reclaim the zone at the threshold")
+        object.__setattr__(self, "sweep_bar_time_utc", bar_time)
+        object.__setattr__(self, "known_at_utc", known_at)
+        object.__setattr__(self, "previous_close", previous)
+        object.__setattr__(self, "wick_price", wick)
+        object.__setattr__(self, "close", close)
+        object.__setattr__(self, "min_sweep_bps", threshold)
+        if self.event_id != structure_sweep_event_id(
+            self.study_id,
+            self.version,
+            self.instrument,
+            self.timeframe,
+            zone.event_id,
+            bar_time,
+            threshold,
+        ):
+            raise ValueError("event_id does not match the canonical sweep identity")
+
+
 class DataStatus(StrEnum):
     VALID = "VALID"
     STALE = "STALE"
@@ -521,7 +627,7 @@ class StudyResult:
     limitations: tuple[str, ...]
     data_snapshot_id: str | None
     provenance: tuple[tuple[str, str], ...] = ()
-    events: tuple[StudyEvent | StructureBreakEvent | StructureZone, ...] = ()
+    events: tuple[StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of_utc", as_utc(self.as_of_utc))

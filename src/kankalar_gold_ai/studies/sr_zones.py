@@ -2,6 +2,7 @@
 
 import math
 from collections.abc import Mapping
+from datetime import datetime
 from fractions import Fraction
 
 from kankalar_gold_ai.core.contracts import (
@@ -72,8 +73,6 @@ class SupportResistanceZonesStudy:
         context: StudyComputationContext,
     ) -> StudyOutput:
         normalized = self.validate_config(config)
-        lookback, tolerance = normalized["lookback_bars"], normalized["tolerance_bps"]
-        assert type(lookback) is int and type(tolerance) is float
         output = ConfirmedSwingsStudy().compute_with_context(
             bars,
             {"left_bars": normalized["left_bars"], "right_bars": normalized["right_bars"]},
@@ -81,6 +80,36 @@ class SupportResistanceZonesStudy:
         )
         if any(type(event) is not StudyEvent for event in output.events):
             raise ValueError("confirmed swing study returned a non-swing event")
+        swings = tuple(event for event in output.events if isinstance(event, StudyEvent))
+        zones = self._zones_from_swings(
+            bars, swings, normalized, context.as_of_utc, context.calendar_context_id
+        )
+        return StudyOutput(
+            status=StudyStatus.AVAILABLE,
+            state="ZONES_IDENTIFIED" if zones else "NO_ZONES",
+            direction=Direction.NOT_APPLICABLE,
+            evidence=(f"zone_count={len(zones)}",),
+            limitations=(
+                "Zones are descriptive, not signals or trading approval.",
+                "Volume-based zone strength is unavailable and unimplemented.",
+            ),
+            events=zones,
+        )
+
+    def _zones_from_swings(
+        self,
+        bars: tuple[MarketBar, ...],
+        confirmed_swings: tuple[StudyEvent, ...],
+        config: Mapping[str, ConfigValue],
+        as_of_utc: datetime,
+        calendar_context_id: str,
+    ) -> tuple[StructureZone, ...]:
+        """Build the same cutoff-bound zones from already computed confirmed swings."""
+        normalized = self.validate_config(config)
+        lookback, tolerance = normalized["lookback_bars"], normalized["tolerance_bps"]
+        assert type(lookback) is int and type(tolerance) is float
+        if not bars:
+            raise ValueError("zone construction requires bars")
         eligible_pivots = {bar.timestamp_utc for bar in bars[-lookback:]}
         zones: list[StructureZone] = []
         for swing_type, zone_type in (
@@ -90,11 +119,10 @@ class SupportResistanceZonesStudy:
             swings = sorted(
                 (
                     event
-                    for event in output.events
-                    if isinstance(event, StudyEvent)
-                    and event.event_type is swing_type
+                    for event in confirmed_swings
+                    if event.event_type is swing_type
                     and event.pivot_time_utc in eligible_pivots
-                    and event.known_at_utc <= context.as_of_utc
+                    and event.known_at_utc <= as_of_utc
                 ),
                 key=lambda event: (event.price, event.event_id),
             )
@@ -117,14 +145,14 @@ class SupportResistanceZonesStudy:
                     self.study_id,
                     self.version,
                     bars[0].instrument,
-                    context.timeframe,
+                    bars[0].timeframe,
                     zone_type,
                     member_ids,
                     prices,
                     known_at,
                     lookback,
                     tolerance,
-                    context.calendar_context_id,
+                    calendar_context_id,
                 )
                 zones.append(
                     StructureZone(
@@ -132,7 +160,7 @@ class SupportResistanceZonesStudy:
                         self.study_id,
                         self.version,
                         bars[0].instrument,
-                        context.timeframe,
+                        bars[0].timeframe,
                         zone_type,
                         member_ids,
                         prices,
@@ -141,18 +169,8 @@ class SupportResistanceZonesStudy:
                         known_at,
                         lookback,
                         tolerance,
-                        context.calendar_context_id,
+                        calendar_context_id,
                     )
                 )
         zones.sort(key=lambda zone: (zone.known_at_utc, zone.zone_type.value, zone.event_id))
-        return StudyOutput(
-            status=StudyStatus.AVAILABLE,
-            state="ZONES_IDENTIFIED" if zones else "NO_ZONES",
-            direction=Direction.NOT_APPLICABLE,
-            evidence=(f"zone_count={len(zones)}",),
-            limitations=(
-                "Zones are descriptive, not signals or trading approval.",
-                "Volume-based zone strength is unavailable and unimplemented.",
-            ),
-            events=tuple(zones),
-        )
+        return tuple(zones)

@@ -18,6 +18,8 @@ from kankalar_gold_ai.core.contracts import (
     SignalLifecycleEvent,
     StructureBreakEvent,
     StructureBreakType,
+    StructureSweepEvent,
+    StructureSweepSide,
     StructureZone,
     StructureZoneType,
     StudyEvent,
@@ -72,6 +74,11 @@ _ZONE_COLUMNS = (
     "tolerance_bps, calendar_context_id"
 )
 _ZONE_SELECT_COLUMNS = ", ".join(f"e.{column}" for column in _ZONE_COLUMNS.split(", "))
+_SWEEP_COLUMNS = (
+    "event_id, study_id, version, instrument, timeframe, reference_zone_id, side, "
+    "sweep_bar_time_utc, known_at_utc, previous_close, wick_price, close, min_sweep_bps"
+)
+_SWEEP_SELECT_COLUMNS = ", ".join(f"e.{column}" for column in _SWEEP_COLUMNS.split(", "))
 
 
 def _reject_constant(name: str) -> object:
@@ -81,7 +88,7 @@ def _reject_constant(name: str) -> object:
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 10
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -151,6 +158,7 @@ class SQLitePersistence:
                     7: self._migrate_to_version_7,
                     8: self._migrate_to_version_8,
                     9: self._migrate_to_version_9,
+                    10: self._migrate_to_version_10,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -512,6 +520,45 @@ class SQLitePersistence:
                 BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
             )
 
+    def _migrate_to_version_10(self, connection: sqlite3.Connection) -> None:
+        """Store immutable sweep records and result observations."""
+        connection.execute(
+            """CREATE TABLE structure_sweep_events (
+                event_id TEXT NOT NULL PRIMARY KEY,
+                study_id TEXT NOT NULL, version TEXT NOT NULL,
+                instrument TEXT NOT NULL, timeframe TEXT NOT NULL,
+                reference_zone_id TEXT NOT NULL REFERENCES structure_zones(event_id),
+                side TEXT NOT NULL, sweep_bar_time_utc TEXT NOT NULL,
+                known_at_utc TEXT NOT NULL, previous_close REAL NOT NULL,
+                wick_price REAL NOT NULL, close REAL NOT NULL, min_sweep_bps REAL NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE structure_sweep_observations (
+                result_id INTEGER NOT NULL REFERENCES study_results(id),
+                event_id TEXT NOT NULL REFERENCES structure_sweep_events(event_id),
+                PRIMARY KEY (result_id, event_id)
+            )"""
+        )
+        for table, condition in (
+            ("structure_sweep_events", "event_id = NEW.event_id"),
+            (
+                "structure_sweep_observations",
+                "result_id = NEW.result_id AND event_id = NEW.event_id",
+            ),
+        ):
+            for operation in ("UPDATE", "DELETE"):
+                connection.execute(
+                    f"""CREATE TRIGGER {table}_no_{operation.lower()}
+                    BEFORE {operation} ON {table}
+                    BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+                )
+            connection.execute(
+                f"""CREATE TRIGGER {table}_no_replace BEFORE INSERT ON {table}
+                WHEN EXISTS (SELECT 1 FROM {table} WHERE ({condition}) OR rowid = NEW.rowid)
+                BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+            )
+
     def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
         """Phase 1B.3 schema: structured provenance and an explicit cache-format column."""
         statements = (
@@ -800,7 +847,10 @@ class SQLitePersistence:
 
     def save_study_result(self, result: StudyResult) -> None:
         """Atomically append a study result and all immutable event observations."""
-        if any(isinstance(event, (StructureBreakEvent, StructureZone)) for event in result.events):
+        if any(
+            isinstance(event, (StructureBreakEvent, StructureZone, StructureSweepEvent))
+            for event in result.events
+        ):
             validate_study_result(result)
         with self._connection() as connection:
             cursor = connection.execute(
@@ -837,21 +887,30 @@ class SQLitePersistence:
             if result_id is None:
                 raise RuntimeError("SQLite did not return the persisted study-result ID")
             for event in result.events:
-                if isinstance(event, StructureZone):
+                if isinstance(event, StructureSweepEvent):
+                    _persist_zone(connection, event.reference_zone)
                     row = connection.execute(
-                        f"SELECT {_ZONE_COLUMNS} FROM structure_zones WHERE event_id = ?",
+                        f"SELECT {_SWEEP_COLUMNS} FROM structure_sweep_events WHERE event_id = ?",
                         (event.event_id,),
                     ).fetchone()
                     if row is None:
                         connection.execute(
-                            f"INSERT INTO structure_zones ({_ZONE_COLUMNS}) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            _zone_values(event),
+                            f"INSERT INTO structure_sweep_events ({_SWEEP_COLUMNS}) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            _sweep_values(event),
                         )
-                    elif _zone_from_row(row) != event:
+                    elif _sweep_from_row(row, event.reference_zone) != event:
                         raise StudyEventConflictError(
                             f"stored event {event.event_id} has a conflicting immutable payload"
                         )
+                    connection.execute(
+                        "INSERT INTO structure_sweep_observations (result_id, event_id) "
+                        "VALUES (?, ?)",
+                        (result_id, event.event_id),
+                    )
+                    continue
+                if isinstance(event, StructureZone):
+                    _persist_zone(connection, event)
                     connection.execute(
                         "INSERT INTO structure_zone_observations (result_id, event_id) "
                         "VALUES (?, ?)",
@@ -965,10 +1024,31 @@ class SQLitePersistence:
                 if self._get_version(connection) >= 9
                 else []
             )
-        all_events: list[StudyEvent | StructureBreakEvent | StructureZone] = [
+            sweep_rows = (
+                connection.execute(
+                    f"""SELECT {_SWEEP_SELECT_COLUMNS}
+                    FROM structure_sweep_events e
+                    JOIN structure_sweep_observations o ON o.event_id = e.event_id
+                    WHERE o.result_id = ?""",
+                    (row[0],),
+                ).fetchall()
+                if self._get_version(connection) >= 10
+                else []
+            )
+            sweeps: list[StructureSweepEvent] = []
+            for sweep_row in sweep_rows:
+                zone_row = connection.execute(
+                    f"SELECT {_ZONE_COLUMNS} FROM structure_zones WHERE event_id = ?",
+                    (sweep_row[5],),
+                ).fetchone()
+                if zone_row is None:
+                    raise StoredStudyResultError("stored sweep references a missing zone")
+                sweeps.append(_sweep_from_row(sweep_row, _zone_from_row(zone_row)))
+        all_events: list[StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent] = [
             *(_study_event_from_row(item) for item in event_rows),
             *(_break_event_from_row(item) for item in break_rows),
             *(_zone_from_row(item) for item in zone_rows),
+            *sweeps,
         ]
         events = tuple(sorted(all_events, key=_study_event_order))
         return _study_result_from_row(row, events)
@@ -1083,8 +1163,10 @@ def _study_event_values(event: StudyEvent) -> tuple[object, ...]:
 
 
 def _study_event_order(
-    event: StudyEvent | StructureBreakEvent | StructureZone,
+    event: StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent,
 ) -> tuple[datetime, datetime, str, str]:
+    if isinstance(event, StructureSweepEvent):
+        return (event.known_at_utc, event.sweep_bar_time_utc, event.side.value, event.event_id)
     if isinstance(event, StructureZone):
         return (event.known_at_utc, event.known_at_utc, event.zone_type.value, event.event_id)
     if isinstance(event, StructureBreakEvent):
@@ -1119,6 +1201,92 @@ def _zone_values(zone: StructureZone) -> tuple[object, ...]:
         zone.tolerance_bps,
         zone.calendar_context_id,
     )
+
+
+def _persist_zone(connection: sqlite3.Connection, zone: StructureZone) -> None:
+    row = connection.execute(
+        f"SELECT {_ZONE_COLUMNS} FROM structure_zones WHERE event_id = ?", (zone.event_id,)
+    ).fetchone()
+    if row is None:
+        connection.execute(
+            f"INSERT INTO structure_zones ({_ZONE_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _zone_values(zone),
+        )
+    elif _zone_from_row(row) != zone:
+        raise StudyEventConflictError(
+            f"stored event {zone.event_id} has a conflicting immutable payload"
+        )
+
+
+def _sweep_values(event: StructureSweepEvent) -> tuple[object, ...]:
+    return (
+        event.event_id,
+        event.study_id,
+        event.version,
+        event.instrument,
+        event.timeframe,
+        event.reference_zone.event_id,
+        event.side.value,
+        _utc_isoformat(event.sweep_bar_time_utc),
+        _utc_isoformat(event.known_at_utc),
+        event.previous_close,
+        event.wick_price,
+        event.close,
+        event.min_sweep_bps,
+    )
+
+
+def _sweep_from_row(row: tuple[object, ...], zone: StructureZone) -> StructureSweepEvent:
+    try:
+        (
+            event_id,
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            zone_id,
+            side,
+            bar_time,
+            known_at,
+            previous,
+            wick,
+            close,
+            threshold,
+        ) = row
+        if any(
+            type(value) is not str
+            for value in (event_id, study_id, version, instrument, timeframe, zone_id, side)
+        ):
+            raise StoredStudyResultError("stored sweep text column has the wrong type")
+        if any(type(value) not in (int, float) for value in (previous, wick, close, threshold)):
+            raise StoredStudyResultError("stored sweep numeric column has the wrong type")
+        assert isinstance(event_id, str) and isinstance(study_id, str)
+        assert isinstance(version, str) and isinstance(instrument, str)
+        assert isinstance(timeframe, str) and isinstance(zone_id, str) and isinstance(side, str)
+        assert isinstance(previous, (int, float)) and isinstance(wick, (int, float))
+        assert isinstance(close, (int, float)) and isinstance(threshold, (int, float))
+        if zone_id != zone.event_id:
+            raise StoredStudyResultError("stored sweep zone reference does not match")
+        return StructureSweepEvent(
+            event_id,
+            study_id,
+            version,
+            instrument,
+            timeframe,
+            zone,
+            StructureSweepSide(side),
+            parse_utc_z(bar_time),
+            parse_utc_z(known_at),
+            previous,
+            wick,
+            close,
+            threshold,
+        )
+    except StoredStudyResultError:
+        raise
+    except (TypeError, ValueError) as error:
+        raise StoredStudyResultError("stored structure sweep row is corrupt") from error
 
 
 def _zone_from_row(row: tuple[object, ...]) -> StructureZone:
@@ -1352,7 +1520,7 @@ def as_utc(value: datetime) -> datetime:
 
 def _study_result_from_row(
     row: tuple[object, ...],
-    events: tuple[StudyEvent | StructureBreakEvent | StructureZone, ...] = (),
+    events: tuple[StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent, ...] = (),
 ) -> StudyResult:
     """Strictly rebuild a StudyResult; any violation raises StoredStudyResultError."""
     try:
