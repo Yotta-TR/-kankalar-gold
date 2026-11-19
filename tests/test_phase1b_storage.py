@@ -1,4 +1,4 @@
-"""SQLite schema v3, strict deserialization and cache-lookup tests (temporary databases)."""
+"""SQLite schema v4, strict deserialization and cache-lookup tests (temporary databases)."""
 
 from __future__ import annotations
 
@@ -237,6 +237,20 @@ INSERT INTO study_results (study_id, version, instrument, timeframe, as_of_utc, 
     limitations_json, data_snapshot_id)
 VALUES ('s.one', '1.0.0', 'TEST_GOLD', 'M5', '2026-01-01T00:15:00Z', 'AVAILABLE', 'up',
     1.5, 0.5, 'BULLISH', 0.1, '{"period": 3}', '["ok"]', '[]', 'bars-v1:sha256:aaaa');
+CREATE TABLE market_ticks (
+    instrument TEXT NOT NULL, timestamp_utc TEXT NOT NULL,
+    timestamp_milliseconds INTEGER, bid REAL, ask REAL, last REAL, volume REAL,
+    flags INTEGER, source TEXT NOT NULL, retrieved_at_utc TEXT NOT NULL,
+    PRIMARY KEY (instrument, timestamp_utc, source)
+);
+CREATE INDEX idx_market_ticks_instrument ON market_ticks(instrument);
+CREATE TABLE market_quotes (
+    instrument TEXT NOT NULL, timestamp_utc TEXT NOT NULL,
+    timestamp_milliseconds INTEGER, bid REAL NOT NULL, ask REAL NOT NULL,
+    last REAL, source TEXT NOT NULL, retrieved_at_utc TEXT NOT NULL,
+    PRIMARY KEY (instrument, timestamp_utc, source)
+);
+CREATE INDEX idx_market_quotes_instrument ON market_quotes(instrument);
 """
 
 
@@ -253,22 +267,26 @@ def _snapshot(path: Path) -> list[tuple[object, ...]]:
         ).fetchall()
 
 
-def test_v2_to_v3_migration_preserves_data_and_old_rows_are_not_hits(tmp_path: Path) -> None:
+def test_v2_to_v4_migration_preserves_data_and_old_rows_are_not_hits(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
     _v2_db(path)
     before = _snapshot(path)
     store = SQLitePersistence(path)
     store.initialize()
-    assert SQLitePersistence.SCHEMA_VERSION == 3
+    assert SQLitePersistence.SCHEMA_VERSION == 4
     assert _snapshot(path) == before
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         row = connection.execute(
             "SELECT provenance_json, cache_format_version FROM study_results"
         ).fetchone()
         assert row == (None, None)
         indexes = {r[1] for r in connection.execute("PRAGMA index_list(study_results)")}
         assert "idx_study_results_cache" in indexes
+        tick_columns = {r[1] for r in connection.execute("PRAGMA table_info(market_ticks)")}
+        quote_columns = {r[1] for r in connection.execute("PRAGMA table_info(market_quotes)")}
+        assert {"id", "event_hash"} <= tick_columns
+        assert {"id", "event_hash"} <= quote_columns
     old_key = _key(data_snapshot_id="bars-v1:sha256:aaaa", inputs_json='{"period": 3}')
     assert store.find_cached_study_result(old_key) is None
 
@@ -298,3 +316,91 @@ def test_injected_v3_failure_rolls_back_to_v2(
     monkeypatch.undo()
     SQLitePersistence(path).initialize()
     assert _snapshot(path) == before
+
+
+V3_MARKET_DATA_SCHEMA = """
+CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+INSERT INTO schema_version VALUES (3);
+CREATE TABLE market_ticks (
+    instrument TEXT NOT NULL, timestamp_utc TEXT NOT NULL,
+    timestamp_milliseconds INTEGER, bid REAL, ask REAL, last REAL, volume REAL,
+    flags INTEGER, source TEXT NOT NULL, retrieved_at_utc TEXT NOT NULL,
+    PRIMARY KEY (instrument, timestamp_utc, source)
+);
+CREATE INDEX idx_market_ticks_instrument ON market_ticks(instrument);
+CREATE TABLE market_quotes (
+    instrument TEXT NOT NULL, timestamp_utc TEXT NOT NULL,
+    timestamp_milliseconds INTEGER, bid REAL NOT NULL, ask REAL NOT NULL,
+    last REAL, source TEXT NOT NULL, retrieved_at_utc TEXT NOT NULL,
+    PRIMARY KEY (instrument, timestamp_utc, source)
+);
+CREATE INDEX idx_market_quotes_instrument ON market_quotes(instrument);
+INSERT INTO market_ticks VALUES (
+    'TEST_GOLD', '2026-01-01T00:15:00Z', 1767226500000, 100.0, 100.1,
+    NULL, NULL, 2, 'synthetic', '2026-01-01T00:16:00Z'
+);
+INSERT INTO market_quotes VALUES (
+    'TEST_GOLD', '2026-01-01T00:15:00Z', 1767226500000, 100.0, 100.1,
+    NULL, 'synthetic', '2026-01-01T00:16:00Z'
+);
+"""
+
+
+def _v3_market_data_db(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.executescript(V3_MARKET_DATA_SCHEMA)
+
+
+def test_v3_to_v4_migration_preserves_market_data(tmp_path: Path) -> None:
+    path = tmp_path / "events.db"
+    _v3_market_data_db(path)
+
+    SQLitePersistence(path).initialize()
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchone() == (4,)
+        tick = connection.execute(
+            "SELECT instrument, timestamp_utc, bid, ask, source FROM market_ticks"
+        ).fetchone()
+        quote = connection.execute(
+            "SELECT instrument, timestamp_utc, bid, ask, source FROM market_quotes"
+        ).fetchone()
+        tick_hash = connection.execute("SELECT event_hash FROM market_ticks").fetchone()[0]
+        quote_hash = connection.execute("SELECT event_hash FROM market_quotes").fetchone()[0]
+        assert tick_hash and quote_hash
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%_v4'"
+            ).fetchall()
+            == []
+        )
+    assert tick == ("TEST_GOLD", "2026-01-01T00:15:00Z", 100.0, 100.1, "synthetic")
+    assert quote == ("TEST_GOLD", "2026-01-01T00:15:00Z", 100.0, 100.1, "synthetic")
+
+
+def test_injected_v4_failure_rolls_back_market_data_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "events.db"
+    _v3_market_data_db(path)
+    original = SQLitePersistence._migrate_to_version_4
+
+    def fail_after_schema_work(
+        persistence: SQLitePersistence, connection: sqlite3.Connection
+    ) -> None:
+        original(persistence, connection)
+        raise sqlite3.OperationalError("injected")
+
+    monkeypatch.setattr(SQLitePersistence, "_migrate_to_version_4", fail_after_schema_work)
+
+    with pytest.raises(MigrationError, match="rolled back"):
+        SQLitePersistence(path).initialize()
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchone() == (3,)
+        assert connection.execute("SELECT COUNT(*) FROM market_ticks").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM market_quotes").fetchone() == (1,)
+        tick_columns = {row[1] for row in connection.execute("PRAGMA table_info(market_ticks)")}
+        quote_columns = {row[1] for row in connection.execute("PRAGMA table_info(market_quotes)")}
+        assert "event_hash" not in tick_columns
+        assert "event_hash" not in quote_columns

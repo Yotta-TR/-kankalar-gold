@@ -70,15 +70,16 @@ Checked against the repository (not assumed):
 | Bars/ticks/quotes | `MarketBar` carries instrument, timeframe, UTC timestamp, OHLC, `volume`, `tick_volume`, `real_volume`, `spread_points`, `source`, `retrieved_at_utc`. `MarketTick` and `MarketQuote` carry bid/ask/last, `source`, `retrieved_at_utc`. |
 | Timeframes | `HistoricalDataPipeline` supports `M1, M5, M15, H1, H4, D1`; retrieval is bounded to 366 days. |
 | Fail-closed bar ingestion (`data/pipeline.py`) | `HistoricalDataPipeline.retrieve_bars` and `latest_complete_bar` validate **bars only** and raise `HistoricalDataQualityError` (carrying the `DataQualityReport`) for any status other than `VALID`. |
-| Quotes and ticks | `data/quality.py` has `validate_quote` (returns a `DataQualityReport`; checks finite/invalid bid-ask, future and stale timestamps, spread limit). No tick validator was found. Quotes and ticks do not pass through `HistoricalDataPipeline`; persistence methods `save_market_quote` and `save_market_ticks` exist, and the MT5 provider has `get_ticks`. No fail-closed quote/tick ingestion path equivalent to the bar pipeline exists **[TBD]**. |
+| Quotes and ticks | `validate_quote` reports non-finite/crossed/non-positive bid/ask, future or stale timestamps, inconsistent milliseconds, invalid last, and excessive spread. The MT5 adapter validates tick timestamp/range, finite and non-negative price values, bid/ask ordering, flags, changed-field consistency, exact duplicate records, and out-of-order events; distinct updates sharing a timestamp are preserved. Empty tick history has a typed missing-data error. Quotes and ticks still do not pass through a shared `ValidatedQuote`/`ValidatedTick` study pipeline; quote freshness/spread thresholds must be explicitly checked by the caller **[TBD]**. |
 | Instrument | The logical project identity is `GOLD_USD` [SPEC §19]; the broker symbol is `null` until discovered and confirmed from MT5 [SPEC §19]. It is commonly labelled XAUUSD, but the exact symbol is unresolved. |
-| Gap semantics (`data/quality.py`) | Without a caller-supplied `expected_open` session callback, gaps are reported as `GAP_SESSION_UNKNOWN` rather than missing data; weekends/closures are not assumed to be errors. No built-in market calendar exists. |
-| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row (see ADR-007). Bars, ticks, quotes, instrument specifications, data-quality events and provider-health events are also written source-aware. Schema version 3. |
+| Gap semantics (`data/calendar.py`, `data/quality.py`) | Gaps are classified with an explicit broker/instrument calendar. Known closures are retained as valid-quality diagnostics, open-session missing bars and unknown calendar coverage fail closed. The typed calendar contract has no broker schedule or timezone defaults; all calendar tests use synthetic schedules. |
+| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; schema v4 rebuilds quote/tick tables with event identities so distinct updates at one timestamp are retained while exact repeats are rejected. `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row (see ADR-007). Data-record writes are insert-only through the persistence API; schema migrations and each write batch are transactional. Schema version 4. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
 | Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. |
+| Pipeline failure integration | `studies.pipeline_execution.run_pipeline_study` runs only validated bars; known quality, empty-history, and typed provider failures become persisted non-computing `StudyResult`s with status/reason/source evidence. Other request/programming errors still propagate. |
 | Multi-timeframe coordination | `studies/multitimeframe.py` defines requests and complete preflight; `studies/multitimeframe_coordinator.py` executes the independent runs in canonical order after preflight. |
 | Runner preparation | `StudyRunner.prepare` validates and normalizes one request/input pair and computes its individual snapshot metadata without cache lookup, computation or persistence. |
-| Not present | No market/session calendar, no macro/COT/futures adapters, no volume-profile or order-book data. |
+| Not present | No configured/verified broker calendar schedule, no macro/COT/futures adapters, no volume-profile or order-book data. |
 
 ### 3.1 Multi-timeframe coordination
 
@@ -91,6 +92,40 @@ Checked against the repository (not assumed):
   maximum age for every supported timeframe. The limit is inclusive and has no
   automatic weekend or closure exemption. Candle completion time is open time
   plus timeframe duration.
+- A separate `calendar-open-age` v1.0.0 policy requires explicit wall-clock
+  and open-market age limits plus one explicit `SessionCalendar`. Its manifest
+  records the calendar identity/configuration fingerprint, policy configuration,
+  wall-clock age, open-market age, and unknown-coverage diagnostics. It has no
+  post-reopening grace period; unknown calendar coverage fails closed.
+- `SessionCalendar` represents local weekly sessions, overnight sessions,
+  holidays, exceptional UTC closures, and separate effective and coverage
+  intervals. Effective dates define when a schedule applies; coverage dates
+  define where its schedule information is known. Every calendar explicitly
+  names its provider, instrument, provenance source/reference, and IANA
+  timezone, and validated inputs cannot reuse it for another provider or
+  instrument. IANA timezone rules are used for DST. Ambiguous local schedule
+  boundaries require an explicit fold; nonexistent boundaries fail rather
+  than being guessed.
+- Calendar scope is checked before gap classification in both raw and validated
+  paths; a mismatch raises `ValueError`. Empty input can be checked against an
+  explicitly requested instrument but cannot establish a provider identity.
+  The MT5 adapter's current source value `mt5` identifies the adapter type, not
+  a unique broker/server. A production broker calendar requires a stable,
+  explicitly configured broker/provider source identity.
+- D1 bars use local midnight-to-midnight boundaries only when validated with an
+  explicit calendar; these days may span 23, 24, or 25 UTC hours. Without a
+  calendar, existing D1 behavior remains fixed 24-hour UTC intervals. The
+  `one-timeframe-duration` v1.0.0 freshness limit remains fixed at 24 hours.
+  Calendar-scoped D1 `latest_complete_bar` searches a configurable 1–366 UTC
+  day lookback (default 366), excludes the current local day, and fails closed
+  if a trailing gap contains open time or unknown calendar coverage. With no
+  completed candidates, it returns no bar only when the search interval is
+  fully known closed. Empty history cannot establish a provider identity.
+  Every calendar-validated bar's entire half-open interval must be covered.
+- Legacy `expected_open` callbacks remain supported for historical bar
+  validation, but they have no stable identity/version and cannot satisfy the
+  calendar-aware freshness policy. No real broker schedule has been validated;
+  calendar tests use synthetic schedules only.
 - Preflight prepares every single-timeframe request and rejects normalized
   duplicate execution identities before any component execution or persistence.
 - The canonical input identity excludes final study-result statuses. The
@@ -150,8 +185,10 @@ statuses to stay distinct but does not define this table):
 
 The runner maps a caller-supplied `DataFailure` one-to-one to the same-named `StudyStatus`. The coordinator also maps stale validated bars to a `STALE` failure without computing. The bar pipeline does not automatically produce a `DataFailure`; invalid data never reaches `compute`.
 
-The fixed coordinator freshness policy has no weekend or closure exemption;
-a session-aware policy remains **[TBD]**.
+The existing fixed coordinator freshness policy has no weekend or closure
+exemption. The separate calendar-aware policy is implemented for explicit
+calendar inputs; the actual broker schedule, timezone, exceptional closures,
+freshness thresholds, and calendar source remain **[TBD]**.
 
 ### 4.4 Common closed-bar / point-in-time behavior
 

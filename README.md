@@ -5,9 +5,17 @@ gold research. No trading logic or order execution is implemented.
 
 Phase 1A completes market-data contracts, offline quality checks, injectable
 read-only MT5 adapter, configuration-based provider selection, historical
-coverage validation, and an append-only versioned SQLite persistence layer.
+coverage validation, and an append-oriented versioned SQLite persistence layer
+(schema v4).
 Comprehensive testing with deterministic synthetic data verifies all components.
 This is research-only software; do not use for live market analysis.
+
+The data layer includes an explicit broker/instrument session-calendar contract,
+calendar-aware freshness, quote/tick integrity checks, and a fail-closed bridge
+from historical retrieval to single-study execution. No broker schedule,
+timezone, holiday calendar, or freshness limit is configured by default;
+calendar tests use synthetic schedules and do not establish actual
+broker-session behavior.
 
 The optional `mt5` dependency is restricted to Windows AMD64. As checked on
 12 November 2026, the official PyPI release provides Windows x86-64 wheels
@@ -59,7 +67,8 @@ before adding any broker or messaging integration.
 
 - `core`: typed market, study, proposal, risk, lifecycle, and persistence contracts.
 - `data`: configuration-based provider manager, historical data pipeline with
-  validation and normalization, data-quality integration.
+  validation and normalization, data-quality integration, and explicit
+  versioned session-calendar contracts.
 - `adapters.mock`: in-memory test provider; no network access.
 - `adapters.mt5`: injected read-only terminal adapter; Windows only, disabled
   by default.
@@ -73,8 +82,20 @@ before adding any broker or messaging integration.
 
 ## Next phase
 
-Phase 1B.3 (single-timeframe `StudyRunner`, append-only snapshot-keyed result cache, SQLite schema v3) and the F4 no-lookahead harness are implemented. The pipeline's inclusive bar-completion `end_utc` is bound to the runner's `as_of_utc`, and provider overreach is rejected (ADR-008). Use `retrieve_validated_bars` for studies; `retrieve_bars` returns a raw tuple without cutoff provenance. `volatility.atr`, `trend.ma_slope_order`, `trend.adx_dm`, and independent multi-timeframe coordination are implemented for research. Strategies and runner scheduling remain unimplemented.
-The adapter has only been tested with fakes, not against a real terminal. The
-official MT5 `initialize()` may launch the terminal and use its last saved
-account; do not call it until a separate read-only environment and terminal
-setup are reviewed.
+Phase 1B.3 (single-timeframe `StudyRunner`, snapshot-keyed result cache, SQLite
+schema v4) and the F4 no-lookahead harness are implemented. The pipeline's
+inclusive bar-completion `end_utc` is bound to the runner's `as_of_utc`, and
+provider overreach is rejected (ADR-008). Use `retrieve_validated_bars` for
+studies; `retrieve_bars` returns a raw tuple without cutoff provenance.
+`run_pipeline_study` connects retrieval and study execution, mapping typed data
+and provider failures to persisted non-computing study results. The
+`volatility.atr`, `trend.ma_slope_order`, and `trend.adx_dm` studies and
+independent multi-timeframe coordination are descriptive research tools.
+Strategies and runner scheduling remain unimplemented.
+
+The MT5 adapter has bounded connection/history retries and a timeout for
+initialization, but MT5's synchronous history functions do not expose a
+cancellable request timeout. The adapter has only been tested with fakes, not
+against a real terminal. The official MT5 `initialize()` may launch the
+terminal and use its last saved account; do not call it until a separate
+read-only environment and terminal setup are reviewed.
