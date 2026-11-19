@@ -179,6 +179,7 @@ def test_one_atr_registration_has_independent_results_and_cache_keys_per_timefra
             as_of_utc=result.as_of_utc,
             inputs_json=canonical_inputs_json(result.inputs),
             data_snapshot_id=result.data_snapshot_id or "",
+            calendar_context_id=dict(result.provenance)["calendar_context_id"],
         )
 
     assert study.required_timeframes == frozenset(SUPPORTED_TIMEFRAMES)
@@ -220,6 +221,7 @@ def test_persistence_round_trip_and_period_cache_identity(tmp_path: Path) -> Non
         as_of_utc=first.as_of_utc,
         inputs_json=canonical_inputs_json(first.inputs),
         data_snapshot_id=first.data_snapshot_id or "",
+        calendar_context_id=dict(first.provenance)["calendar_context_id"],
     )
     second_key = StudyResultKey(
         study_id=different_period.study_id,
@@ -229,6 +231,7 @@ def test_persistence_round_trip_and_period_cache_identity(tmp_path: Path) -> Non
         as_of_utc=different_period.as_of_utc,
         inputs_json=canonical_inputs_json(different_period.inputs),
         data_snapshot_id=different_period.data_snapshot_id or "",
+        calendar_context_id=dict(different_period.provenance)["calendar_context_id"],
     )
     assert first_key != second_key
     assert store.find_cached_study_result(first_key) == first

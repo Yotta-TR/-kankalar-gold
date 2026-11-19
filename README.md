@@ -6,7 +6,7 @@ gold research. No trading logic or order execution is implemented.
 Phase 1A completes market-data contracts, offline quality checks, injectable
 read-only MT5 adapter, configuration-based provider selection, historical
 coverage validation, and an append-oriented versioned SQLite persistence layer
-(schema v5).
+(schema v6).
 Comprehensive testing with deterministic synthetic data verifies all components.
 This is research-only software; do not use for live market analysis.
 
@@ -82,8 +82,8 @@ before adding any broker or messaging integration.
 
 ## Next phase
 
-Phase 1B.3 (single-timeframe `StudyRunner`, snapshot-keyed result cache, SQLite
-schema v5) and the F4 no-lookahead harness are implemented. The pipeline's
+Phase 1B.3 (single-timeframe `StudyRunner`, snapshot- and calendar-context-keyed
+result cache, SQLite schema v6) and the F4 no-lookahead harness are implemented. The pipeline's
 inclusive bar-completion `end_utc` is bound to the runner's `as_of_utc`, and
 provider overreach is rejected (ADR-008). Use `retrieve_validated_bars` for
 studies; `retrieve_bars` returns a raw tuple without cutoff provenance.
@@ -99,7 +99,10 @@ evidence. Donchian uses prior completed bars and reports unclipped channel
 position. MACD and Donchian require explicit periods and are descriptive only.
 Confirmed swings return typed, immutable events: pivot time is distinct from
 confirmation time, and D1 completion uses the validated calendar timezone.
-SQLite schema v5 stores events append-only with their result observations.
+Calendar identity participates in cache lookup independently of the unchanged
+bar-data snapshot. Without an explicit calendar, D1 completion uses fixed
+24-hour UTC days. SQLite schema v5 stores events append-only with their result observations;
+schema v6 adds the calendar-context cache identity.
 Swing events are descriptive and have no predictive or trading approval.
 Strategies and runner scheduling remain unimplemented.
 

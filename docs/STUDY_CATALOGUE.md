@@ -74,7 +74,7 @@ Checked against the repository (not assumed):
 | Quotes and ticks | `validate_quote` reports non-finite/crossed/non-positive bid/ask, future or stale timestamps, inconsistent milliseconds, invalid last, and excessive spread. The MT5 adapter validates tick timestamp/range, finite and non-negative price values, bid/ask ordering, flags, changed-field consistency, exact duplicate records, and out-of-order events; distinct updates sharing a timestamp are preserved. Empty tick history has a typed missing-data error. Quotes and ticks still do not pass through a shared `ValidatedQuote`/`ValidatedTick` study pipeline; quote freshness/spread thresholds must be explicitly checked by the caller **[TBD]**. |
 | Instrument | The logical project identity is `GOLD_USD` [SPEC §19]; the broker symbol is `null` until discovered and confirmed from MT5 [SPEC §19]. It is commonly labelled XAUUSD, but the exact symbol is unresolved. |
 | Gap semantics (`data/calendar.py`, `data/quality.py`) | Gaps are classified with an explicit broker/instrument calendar. Known closures are retained as valid-quality diagnostics, open-session missing bars and unknown calendar coverage fail closed. The typed calendar contract has no broker schedule or timezone defaults; all calendar tests use synthetic schedules. |
-| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; schema v4 rebuilds quote/tick tables with event identities so distinct updates at one timestamp are retained while exact repeats are rejected. `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row (see ADR-007). Data-record writes are insert-only through the persistence API; schema migrations and each write batch are transactional. Schema version 4. |
+| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; schema v4 rebuilds quote/tick tables with event identities; schema v5 adds immutable study events and result observations; schema v6 adds the calendar-context cache identity. `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row using the full cache key (see ADR-007 and ADR-020). Data-record writes are insert-only through the persistence API; schema migrations and each write batch are transactional. Current schema version 6. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
 | Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. |
 | Pipeline failure integration | `studies.pipeline_execution.run_pipeline_study` runs only validated bars; known quality, empty-history, and typed provider failures become persisted non-computing `StudyResult`s with status/reason/source evidence. Other request/programming errors still propagate. |
@@ -529,15 +529,24 @@ later); BOS/CHoCH and zones depend on swings; D1/D2 as in §5.1 tier C.
   is the completion timestamp of bar `pivot_index + right_bars`, so it is
   delayed and distinct from pivot time. D1 completion uses the validated
   calendar timezone and local-day boundary; it is not assumed to be 24 hours.
-  The runner binds computation to `as_of_utc`, and no event may be known after
-  that cutoff.
+  Without an explicit calendar, the system uses fixed 24-hour UTC days and
+  does not require an approved calendar. The runner binds computation to
+  `as_of_utc`, and no event may be known after that cutoff.
 - Stable IDs hash study/version, instrument, timeframe, event type, pivot
-  time, and left/right settings; retrieval time and snapshot ID are excluded.
+  time, left/right settings, and explicit calendar-context identity when a
+  calendar is supplied; retrieval time and bar snapshot ID are excluded.
   Event payloads are immutable. SQLite schema v5 stores one event identity and
   append-only result-observation links, atomically with the parent result.
   Repeated identical identities are idempotent; a conflicting payload fails
-  closed. Cache hits restore the typed event collection, and stored events can
-  be retrieved in deterministic order for future structure studies.
+  closed. Schema v6 adds the stable calendar-context identity to the persisted
+  cache lookup. Calendar identity includes the named calendar/version, IANA
+  timezone, scope, coverage, provenance, and schedule settings; the canonical
+  no-calendar identity specifies fixed 24-hour UTC completion. The calendar
+  identity affects provenance and cache identity, not `data_snapshot_id`, which
+  remains a fingerprint of bar data only. A different calendar must recompute;
+  repeating with the same calendar and bars may reuse its cached result.
+  Cache hits restore the typed event collection, and stored events can be
+  retrieved in deterministic order for future structure studies.
 - The strict unique-extreme rule rejects equal highs/lows; it intentionally
   does not pick a first/last plateau bar. These events are descriptive only.
   BOS/CHoCH semantics, zones, equal-level handling, and all other downstream

@@ -51,9 +51,14 @@ def study_event_id(
     pivot_time_utc: datetime,
     left_bars: int,
     right_bars: int,
+    calendar_context_id: str | None = None,
 ) -> str:
-    """Return a deterministic ID for the immutable identity fields of a study event."""
-    identity = (
+    """Return a deterministic ID for an event, optionally scoped to its calendar context."""
+    if calendar_context_id is not None and (
+        type(calendar_context_id) is not str or not calendar_context_id
+    ):
+        raise ValueError("calendar_context_id must be a non-empty built-in string or None")
+    identity_fields = (
         study_id,
         version,
         instrument,
@@ -63,9 +68,13 @@ def study_event_id(
         left_bars,
         right_bars,
     )
+    identity = (
+        identity_fields if calendar_context_id is None else (*identity_fields, calendar_context_id)
+    )
     canonical = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"study-event-v1:sha256:{digest}"
+    event_id = f"study-event-v1:sha256:{digest}"
+    return event_id if calendar_context_id is None else f"{event_id}:{calendar_context_id}"
 
 
 class RiskOutcome(StrEnum):
@@ -163,7 +172,27 @@ class StudyEvent:
             self.left_bars,
             self.right_bars,
         )
-        if self.event_id != expected_id:
+        context_marker = ":calendar-context-v1:sha256:"
+        _, marker, context_digest = self.event_id.rpartition(context_marker)
+        context_id = f"calendar-context-v1:sha256:{context_digest}"
+        has_valid_context = (
+            bool(marker)
+            and len(context_digest) == 64
+            and all(character in "0123456789abcdef" for character in context_digest)
+        )
+        if has_valid_context:
+            has_valid_context = self.event_id == study_event_id(
+                self.study_id,
+                self.version,
+                self.instrument,
+                self.timeframe,
+                self.event_type,
+                pivot_time,
+                self.left_bars,
+                self.right_bars,
+                calendar_context_id=context_id,
+            )
+        if self.event_id != expected_id and not has_valid_context:
             raise ValueError("event_id does not match the canonical event identity")
 
 

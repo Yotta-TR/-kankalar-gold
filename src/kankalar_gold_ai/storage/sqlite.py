@@ -25,6 +25,7 @@ from kankalar_gold_ai.core.contracts import (
 from kankalar_gold_ai.core.study_results import (
     CACHE_FORMAT_VERSION,
     PROV_CACHE_FORMAT,
+    PROV_CALENDAR_CONTEXT_ID,
     StudyResultKey,
     StudyResultValidationError,
     parse_utc_z,
@@ -62,7 +63,7 @@ def _reject_constant(name: str) -> object:
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -128,6 +129,7 @@ class SQLitePersistence:
                     3: self._migrate_to_version_3,
                     4: self._migrate_to_version_4,
                     5: self._migrate_to_version_5,
+                    6: self._migrate_to_version_6,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -350,6 +352,18 @@ class SQLitePersistence:
                 END
                 """
             )
+
+    def _migrate_to_version_6(self, connection: sqlite3.Connection) -> None:
+        """Include calendar computation context in the persisted cache lookup identity."""
+        connection.execute("ALTER TABLE study_results ADD COLUMN calendar_context_id TEXT")
+        connection.execute(
+            """
+            CREATE INDEX idx_study_results_cache_calendar ON study_results (
+                study_id, version, instrument, timeframe, as_of_utc,
+                data_snapshot_id, inputs_json, calendar_context_id, cache_format_version
+            )
+            """
+        )
 
     def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
         """Phase 1B.3 schema: structured provenance and an explicit cache-format column."""
@@ -646,8 +660,8 @@ class SQLitePersistence:
                     study_id, version, instrument, timeframe, as_of_utc, status, state,
                     value, normalized_value, direction, uncertainty, inputs_json,
                     evidence_json, limitations_json, data_snapshot_id,
-                    provenance_json, cache_format_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    provenance_json, cache_format_version, calendar_context_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.study_id,
@@ -667,6 +681,7 @@ class SQLitePersistence:
                     result.data_snapshot_id,
                     json.dumps(dict(result.provenance), sort_keys=True),
                     dict(result.provenance).get(PROV_CACHE_FORMAT),
+                    dict(result.provenance).get(PROV_CALENDAR_CONTEXT_ID),
                 ),
             )
             result_id = cursor.lastrowid
@@ -710,7 +725,7 @@ class SQLitePersistence:
                 SELECT {_STUDY_RESULT_COLUMNS} FROM study_results
                 WHERE study_id = ? AND version = ? AND instrument = ? AND timeframe = ?
                   AND as_of_utc = ? AND data_snapshot_id = ? AND inputs_json = ?
-                  AND cache_format_version = ?
+                  AND cache_format_version = ? AND calendar_context_id IS ?
                   AND status IN ('AVAILABLE', 'INSUFFICIENT_DATA', 'UNAVAILABLE')
                 ORDER BY id DESC LIMIT 1
                 """,
@@ -723,6 +738,7 @@ class SQLitePersistence:
                     key.data_snapshot_id,
                     key.inputs_json,
                     key.cache_format_version,
+                    key.calendar_context_id,
                 ),
             ).fetchone()
             if row is None:

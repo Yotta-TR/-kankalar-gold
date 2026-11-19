@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,6 +20,17 @@ from kankalar_gold_ai.data.errors import HistoricalDataQualityError
 from kankalar_gold_ai.data.quality import bar_completion_utc, validate_bars
 
 ExpectedOpen = Callable[[datetime], bool]
+
+_NO_CALENDAR_CONTEXT_JSON = json.dumps(
+    {
+        "calendar_id": None,
+        "completion_policy": "fixed-24-hour-utc",
+        "timezone": "UTC",
+    },
+    sort_keys=True,
+    separators=(",", ":"),
+)
+_CALENDAR_CONTEXT_ID_PREFIX = "calendar-context-v1:sha256:"
 
 
 def _utc_session_policy(policy: ExpectedOpen | None) -> ExpectedOpen | None:
@@ -55,6 +68,8 @@ class ValidatedBarSet:
     calendar_timezone: str | None
     calendar_configuration_sha256: str | None
     calendar_identity_json: str | None
+    calendar_context_id: str
+    calendar_context_json: str
 
     def __init__(
         self,
@@ -99,6 +114,13 @@ class ValidatedBarSet:
             raise ValueError("input bars complete after cutoff_utc")
 
         first = bars[0]
+        identity = None if calendar is None else calendar.canonical_identity()
+        identity_json = (
+            _NO_CALENDAR_CONTEXT_JSON if calendar is None else calendar.canonical_identity_json()
+        )
+        context_id = (
+            _CALENDAR_CONTEXT_ID_PREFIX + hashlib.sha256(identity_json.encode("utf-8")).hexdigest()
+        )
         object.__setattr__(self, "instrument", first.instrument)
         object.__setattr__(self, "timeframe", timeframe)
         object.__setattr__(self, "source", first.source)
@@ -109,7 +131,6 @@ class ValidatedBarSet:
         object.__setattr__(self, "expected_open", session_policy)
         object.__setattr__(self, "calendar_id", None if calendar is None else calendar.calendar_id)
         object.__setattr__(self, "calendar_version", None if calendar is None else calendar.version)
-        identity = None if calendar is None else calendar.canonical_identity()
         object.__setattr__(
             self, "calendar_timezone", None if calendar is None else calendar.timezone_name
         )
@@ -121,8 +142,10 @@ class ValidatedBarSet:
         object.__setattr__(
             self,
             "calendar_identity_json",
-            None if calendar is None else calendar.canonical_identity_json(),
+            None if calendar is None else identity_json,
         )
+        object.__setattr__(self, "calendar_context_id", context_id)
+        object.__setattr__(self, "calendar_context_json", identity_json)
 
     @classmethod
     def from_bars(

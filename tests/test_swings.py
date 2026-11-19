@@ -26,6 +26,7 @@ from kankalar_gold_ai.data.calendar import (
 from kankalar_gold_ai.data.errors import HistoricalDataQualityError
 from kankalar_gold_ai.data.pipeline import HistoricalDataPipeline
 from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS, bar_completion_utc
+from kankalar_gold_ai.data.snapshot import compute_bar_snapshot_id
 from kankalar_gold_ai.data.validated import ValidatedBarSet
 from kankalar_gold_ai.storage.sqlite import MigrationError, SQLitePersistence
 from kankalar_gold_ai.studies import (
@@ -414,6 +415,102 @@ def test_d1_confirmation_uses_calendar_day_completion(
     assert event.known_at_utc == expected_known_at
 
 
+def test_d1_without_calendar_uses_fixed_24_hour_utc_completion(tmp_path: Path) -> None:
+    result, _store, bars = _run(
+        tmp_path / "d1-no-calendar.db",
+        (6, 9, 7),
+        (5, 1, 4),
+        timeframe="D1",
+        opens=(
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 2, tzinfo=UTC),
+            datetime(2026, 1, 3, tzinfo=UTC),
+        ),
+    )
+
+    assert result.events[0].known_at_utc == datetime(2026, 1, 4, tzinfo=UTC)
+    assert '"completion_policy":"fixed-24-hour-utc"' in bars.calendar_context_json
+
+
+def test_d1_calendar_context_separates_cache_results(tmp_path: Path) -> None:
+    opens = tuple(datetime(2026, 3, 27 + index, tzinfo=UTC) for index in range(3))
+    raw = _raw_bars((6, 9, 7), (5, 1, 4), timeframe="D1", opens=opens)
+    as_of = datetime(2026, 3, 30, 1, tzinfo=UTC)
+    utc_calendar = _calendar(
+        "UTC",
+        opens[0] - timedelta(days=2),
+        as_of + timedelta(days=2),
+    )
+    london_calendar = _calendar(
+        "Europe/London",
+        opens[0] - timedelta(days=2),
+        as_of + timedelta(days=2),
+    )
+    validated_by_timezone = {
+        calendar.timezone_name: ValidatedBarSet.from_bars(
+            raw,
+            "D1",
+            as_of,
+            cutoff_utc=as_of,
+            expected_instrument=INSTRUMENT,
+            calendar=calendar,
+        )
+        for calendar in (utc_calendar, london_calendar)
+    }
+    utc_bars = validated_by_timezone["UTC"]
+    london_bars = validated_by_timezone["Europe/London"]
+    assert utc_bars.bars == london_bars.bars
+    assert utc_bars.cutoff_utc == london_bars.cutoff_utc == as_of
+    assert utc_bars.calendar_context_id != london_bars.calendar_context_id
+
+    runner, store = _runner(tmp_path / "calendar-cache.db")
+    utc_result = runner.run(_request(utc_bars), utc_bars)
+    london_result = runner.run(_request(london_bars), london_bars)
+
+    assert utc_result.inputs == london_result.inputs
+    assert utc_result.as_of_utc == london_result.as_of_utc == as_of
+    assert (
+        utc_result.data_snapshot_id
+        == london_result.data_snapshot_id
+        == (compute_bar_snapshot_id(raw))
+    )
+    assert utc_result.events[0].known_at_utc == datetime(2026, 3, 30, 0, tzinfo=UTC)
+    assert london_result.events[0].known_at_utc == datetime(2026, 3, 29, 23, tzinfo=UTC)
+    assert dict(utc_result.provenance)["calendar_context_id"] == utc_bars.calendar_context_id
+    assert dict(london_result.provenance)["calendar_context_id"] == london_bars.calendar_context_id
+    assert '"timezone":"UTC"' in dict(utc_result.provenance)["calendar_context_json"]
+    assert '"timezone":"Europe/London"' in dict(london_result.provenance)["calendar_context_json"]
+    with sqlite3.connect(tmp_path / "calendar-cache.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM study_results").fetchone() == (2,)
+
+
+def test_d1_same_calendar_replay_uses_cached_result(tmp_path: Path) -> None:
+    opens = tuple(datetime(2026, 3, 27 + index, tzinfo=UTC) for index in range(3))
+    raw = _raw_bars((6, 9, 7), (5, 1, 4), timeframe="D1", opens=opens)
+    as_of = datetime(2026, 3, 30, 1, tzinfo=UTC)
+    calendar = _calendar(
+        "Europe/London",
+        opens[0] - timedelta(days=2),
+        as_of + timedelta(days=2),
+    )
+    bars = ValidatedBarSet.from_bars(
+        raw,
+        "D1",
+        as_of,
+        cutoff_utc=as_of,
+        expected_instrument=INSTRUMENT,
+        calendar=calendar,
+    )
+    runner, _store = _runner(tmp_path / "same-calendar-cache.db")
+    first = runner.run(_request(bars), bars)
+    replay_runner, _reopened_store = _runner(tmp_path / "same-calendar-cache.db")
+    replay = replay_runner.run(_request(bars), bars)
+
+    assert replay == first
+    with sqlite3.connect(tmp_path / "same-calendar-cache.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM study_results").fetchone() == (1,)
+
+
 def test_cache_persists_structured_events_and_exposes_append_only_retrieval(
     tmp_path: Path,
 ) -> None:
@@ -596,6 +693,50 @@ def test_v4_migration_adds_events_without_rewriting_existing_results(
         assert connection.execute("SELECT version FROM schema_version").fetchone() == (5,)
         assert connection.execute("SELECT * FROM study_results").fetchall() == before
         assert connection.execute("SELECT COUNT(*) FROM study_events").fetchone() == (0,)
+
+
+def test_v5_migration_adds_calendar_cache_identity_as_null_for_old_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "v5.db"
+    monkeypatch.setattr(SQLitePersistence, "SCHEMA_VERSION", 5)
+    store = SQLitePersistence(path)
+    store.initialize()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            INSERT INTO study_results (
+                study_id, version, instrument, timeframe, as_of_utc, status, direction,
+                inputs_json, evidence_json, limitations_json, data_snapshot_id,
+                provenance_json, cache_format_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                STUDY_ID,
+                VERSION,
+                INSTRUMENT,
+                "D1",
+                "2026-03-30T01:00:00Z",
+                "AVAILABLE",
+                "NOT_APPLICABLE",
+                '{"left_bars": 1, "right_bars": 1}',
+                "[]",
+                "[]",
+                "bars-v1:sha256:" + "a" * 64,
+                '{"cache_format_version":"study-result-v1"}',
+                "study-result-v1",
+            ),
+        )
+
+    monkeypatch.setattr(SQLitePersistence, "SCHEMA_VERSION", 6)
+    SQLitePersistence(path).initialize()
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchone() == (6,)
+        assert connection.execute("SELECT calendar_context_id FROM study_results").fetchone() == (
+            None,
+        )
 
 
 def test_v5_migration_failure_rolls_back_to_v4(

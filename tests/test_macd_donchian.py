@@ -277,6 +277,7 @@ def test_registry_snapshot_cache_roundtrip(
         CUTOFF,
         canonical_inputs_json(result.inputs),
         result.data_snapshot_id,
+        calendar_context_id=dict(result.provenance)["calendar_context_id"],
     )
     assert store.find_cached_study_result(key) == result
     assert SQLitePersistence(tmp_path / "studies.db").find_cached_study_result(key) == result

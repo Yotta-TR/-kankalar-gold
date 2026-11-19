@@ -22,6 +22,8 @@ from kankalar_gold_ai.core.study_results import (
     CACHE_FORMAT_VERSION,
     PROV_BAR_COUNT,
     PROV_CACHE_FORMAT,
+    PROV_CALENDAR_CONTEXT_ID,
+    PROV_CALENDAR_CONTEXT_JSON,
     PROV_DATA_CHECKED,
     PROV_SOURCE,
     PROV_STUDY_VERSION,
@@ -342,6 +344,7 @@ class StudyRunner:
                 as_of_utc=request.as_of_utc,
                 inputs_json=inputs_json,
                 data_snapshot_id=snapshot_id,
+                calendar_context_id=bars.calendar_context_id,
             )
         except StudyResultValidationError as error:
             raise StudyExecutionError("failed to build the cache key") from error
@@ -350,6 +353,8 @@ class StudyRunner:
             sorted(
                 {
                     PROV_CACHE_FORMAT: CACHE_FORMAT_VERSION,
+                    PROV_CALENDAR_CONTEXT_ID: bars.calendar_context_id,
+                    PROV_CALENDAR_CONTEXT_JSON: bars.calendar_context_json,
                     PROV_STUDY_VERSION: registered.version,
                     PROV_WINDOW_START: utc_z(prepared.input_window_start_utc),
                     PROV_WINDOW_END: utc_z(prepared.input_window_end_utc),
@@ -426,6 +431,8 @@ class StudyRunner:
                     timeframe=bars.timeframe,
                     as_of_utc=prepared.request.as_of_utc,
                     calendar_timezone=bars.calendar_timezone,
+                    calendar_context_id=bars.calendar_context_id,
+                    calendar_context_json=bars.calendar_context_json,
                     data_snapshot_id=prepared.data_snapshot_id,
                     input_bar_count=prepared.input_bar_count,
                     input_source=prepared.input_source,

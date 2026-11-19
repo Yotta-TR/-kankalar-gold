@@ -131,14 +131,18 @@
   right-hand confirmation candle.
 - Added immutable typed event collections to study outputs/results and a
   contextual runner hook carrying cutoff, timeframe, validated calendar
-  timezone, snapshot ID, and input-window metadata. D1 confirmation uses
-  local-day completion and therefore honors 23-, 24-, and 25-hour calendar
-  days where applicable.
+  timezone and stable calendar identity, snapshot ID, and input-window
+  metadata. D1 confirmation uses local-day completion and therefore honors
+  23-, 24-, and 25-hour calendar days where applicable; without a calendar it
+  uses fixed 24-hour UTC days. Calendar-aware event IDs include the context
+  identity so different confirmation instants do not conflict in append-only
+  event storage.
 - SQLite schema v5 adds append-only study-event identities and result
   observations. Event identities exclude retrieval/snapshot time. Result,
   events, and observation links persist atomically; identical observations
   reuse event identities and conflicting payloads fail closed. Cache hits
-  restore structured events.
+  restore structured events. Schema v6 includes calendar identity in cache
+  lookups while keeping `data_snapshot_id` limited to bar data.
 - BOS/CHoCH, zones, equal-level treatment, prominence, and other downstream
   structure choices remain **[TBD]**. No predictive value or trading approval
   is claimed. See ADR-020 and the study catalogue.

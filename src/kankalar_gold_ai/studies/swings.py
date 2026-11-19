@@ -160,6 +160,9 @@ class ConfirmedSwingsStudy:
                 pivot.timestamp_utc,
                 left,
                 right,
+                calendar_context_id=(
+                    context.calendar_context_id if context.calendar_timezone is not None else None
+                ),
             ),
             study_id=self.study_id,
             version=self.version,

@@ -64,6 +64,8 @@ class StudyComputationContext:
     timeframe: str
     as_of_utc: datetime
     calendar_timezone: str | None
+    calendar_context_id: str
+    calendar_context_json: str
     data_snapshot_id: str
     input_bar_count: int
     input_source: str
@@ -75,6 +77,10 @@ class StudyComputationContext:
             raise ValueError("timeframe must be a non-empty built-in string")
         if self.calendar_timezone is not None and type(self.calendar_timezone) is not str:
             raise ValueError("calendar_timezone must be a built-in string or None")
+        if type(self.calendar_context_id) is not str or not self.calendar_context_id:
+            raise ValueError("calendar_context_id must be a non-empty built-in string")
+        if type(self.calendar_context_json) is not str or not self.calendar_context_json:
+            raise ValueError("calendar_context_json must be a non-empty built-in string")
         if type(self.data_snapshot_id) is not str or not self.data_snapshot_id:
             raise ValueError("data_snapshot_id must be a non-empty built-in string")
         if type(self.input_bar_count) is not int or self.input_bar_count < 1:
