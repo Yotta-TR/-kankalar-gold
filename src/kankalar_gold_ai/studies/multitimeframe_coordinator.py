@@ -30,15 +30,35 @@ class MultiTimeframeAnalysisCoordinator:
             input_data = preflight.request.inputs_by_timeframe[component.timeframe]
             if isinstance(input_data, DataFailure):
                 result = self._runner.run_data_failure(component.prepared.request, input_data)
-            elif component.eligibility is PreflightEligibility.STALE:
+            elif component.eligibility in (
+                PreflightEligibility.STALE,
+                PreflightEligibility.ERROR,
+            ):
+                if component.eligibility is PreflightEligibility.ERROR:
+                    status = DataStatus.ERROR
+                    reasons = component.freshness_reasons
+                else:
+                    status = DataStatus.STALE
+                    if component.max_open_market_age is None:
+                        reasons = ("FRESHNESS_MAX_AGE_EXCEEDED",)
+                    else:
+                        stale_reasons: list[str] = []
+                        if component.bar_age is not None and component.bar_age > component.max_age:
+                            stale_reasons.append("FRESHNESS_MAX_WALL_CLOCK_AGE_EXCEEDED")
+                        if (
+                            component.open_market_age is not None
+                            and component.open_market_age > component.max_open_market_age
+                        ):
+                            stale_reasons.append("FRESHNESS_MAX_OPEN_MARKET_AGE_EXCEEDED")
+                        reasons = tuple(stale_reasons)
                 failure = DataFailure(
                     instrument=preflight.request.instrument,
                     timeframe=component.timeframe,
                     as_of_utc=preflight.request.as_of_utc,
                     report=DataQualityReport(
-                        DataStatus.STALE,
+                        status,
                         preflight.request.as_of_utc,
-                        ("FRESHNESS_MAX_AGE_EXCEEDED",),
+                        reasons,
                     ),
                 )
                 result = self._runner.run_data_failure(component.prepared.request, failure)

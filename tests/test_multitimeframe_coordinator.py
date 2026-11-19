@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,12 +18,14 @@ from kankalar_gold_ai.core.contracts import (
     StudyStatus,
 )
 from kankalar_gold_ai.core.study_results import StudyResultKey
+from kankalar_gold_ai.data.calendar import CalendarProvenance, SessionCalendar, WeeklySession
 from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS
 from kankalar_gold_ai.data.snapshot import compute_bar_snapshot_id
 from kankalar_gold_ai.data.validated import ValidatedBarSet
 from kankalar_gold_ai.storage.sqlite import SQLitePersistence
 from kankalar_gold_ai.studies import (
     AnalysisCompleteness,
+    CalendarAwareFreshnessPolicy,
     DataFailure,
     FreshnessPolicy,
     MultiTimeframeAnalysisCoordinator,
@@ -90,7 +92,13 @@ class CountingStore:
         self.saved.append(result)
 
 
-def bars(timeframe: str, *, count: int = 3, age: timedelta = timedelta()) -> ValidatedBarSet:
+def bars(
+    timeframe: str,
+    *,
+    count: int = 3,
+    age: timedelta = timedelta(),
+    calendar: SessionCalendar | None = None,
+) -> ValidatedBarSet:
     duration = TIMEFRAME_DURATIONS[timeframe]
     items = tuple(
         MarketBar(
@@ -106,7 +114,7 @@ def bars(timeframe: str, *, count: int = 3, age: timedelta = timedelta()) -> Val
         )
         for index in range(count)
     )
-    return ValidatedBarSet.from_bars(items, timeframe, CUTOFF, cutoff_utc=CUTOFF)
+    return ValidatedBarSet.from_bars(items, timeframe, CUTOFF, cutoff_utc=CUTOFF, calendar=calendar)
 
 
 def spec(timeframe: str, study_id: str = "trend.first") -> StudyExecutionSpec:
@@ -243,9 +251,55 @@ def test_stale_bars_and_inclusive_freshness_boundary(tmp_path: Path) -> None:
             "D1": 86_400_000_000,
         },
     }
+    assert "session_calendar" not in manifest
     assert fresh_item.result.status is StudyStatus.AVAILABLE
     assert study.calls == [boundary.bars]
     assert len(store.lookups) == 1 and len(store.saved) == 2
+
+
+def test_unknown_calendar_freshness_fails_before_study_computation(tmp_path: Path) -> None:
+    study = SyntheticStudy("trend.first")
+    coordinator, store = setup(tmp_path, (study,))
+    calendar = SessionCalendar(
+        calendar_id="synthetic.coordinator",
+        version="calendar-v1",
+        provider_id=SOURCE,
+        instrument_id=INSTRUMENT,
+        provenance=CalendarProvenance(
+            source="synthetic-test-fixture",
+            reference="tests/test_multitimeframe_coordinator.py",
+        ),
+        timezone_name="UTC",
+        effective_start_utc=CUTOFF - timedelta(days=1),
+        effective_end_utc=CUTOFF + timedelta(days=1),
+        coverage_start_utc=CUTOFF - timedelta(days=1),
+        coverage_end_utc=CUTOFF - timedelta(hours=1),
+        weekly_sessions=tuple(WeeklySession(day, time(0), time(23, 59)) for day in range(7)),
+    )
+    bar_set = bars("M5", age=timedelta(hours=2), calendar=calendar)
+    analysis_request = MultiTimeframeAnalysisRequest(
+        instrument=INSTRUMENT,
+        as_of_utc=CUTOFF,
+        executions=(spec("M5"),),
+        inputs_by_timeframe={"M5": bar_set},
+        freshness_policy=CalendarAwareFreshnessPolicy(
+            max_wall_clock_age=timedelta(hours=3),
+            max_open_market_age=timedelta(hours=3),
+        ),
+        session_calendar=calendar,
+    )
+
+    result = coordinator.run(analysis_request)
+
+    assert result.components[0].component.eligibility is PreflightEligibility.ERROR
+    assert result.components[0].result.status is StudyStatus.ERROR
+    assert result.components[0].result.evidence == (
+        "DATA_ERROR",
+        "CALENDAR_COVERAGE_UNKNOWN",
+    )
+    assert not study.calls
+    assert store.lookups == []
+    assert len(store.saved) == 1
 
 
 def test_insufficient_warmup_uses_snapshot_bound_runner_path(tmp_path: Path) -> None:

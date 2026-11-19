@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,11 +19,18 @@ from kankalar_gold_ai.core.contracts import (
     StudyStatus,
 )
 from kankalar_gold_ai.core.study_results import StudyResultKey
+from kankalar_gold_ai.data.calendar import (
+    CalendarClosure,
+    CalendarProvenance,
+    SessionCalendar,
+    WeeklySession,
+)
 from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS
 from kankalar_gold_ai.data.validated import ValidatedBarSet
 from kankalar_gold_ai.storage.sqlite import SQLitePersistence
 from kankalar_gold_ai.studies import (
     AnalysisCompleteness,
+    CalendarAwareFreshnessPolicy,
     ComponentResultEnvelope,
     DataFailure,
     FreshnessPolicy,
@@ -99,6 +107,7 @@ def _bars(
     count: int = 3,
     latest_close: datetime = CUTOFF,
     source: str = SOURCE,
+    calendar: SessionCalendar | None = None,
 ) -> ValidatedBarSet:
     duration = TIMEFRAME_DURATIONS[timeframe]
     start = latest_close - duration * (count - 1) - duration
@@ -121,6 +130,7 @@ def _bars(
         timeframe,
         CUTOFF,
         cutoff_utc=CUTOFF,
+        calendar=calendar,
     )
 
 
@@ -129,7 +139,8 @@ def _request(
     inputs: Mapping[str, ValidatedBarSet | DataFailure] | None = None,
     *,
     as_of: datetime = CUTOFF,
-    policy: FreshnessPolicy | None = None,
+    policy: FreshnessPolicy | CalendarAwareFreshnessPolicy | None = None,
+    calendar: SessionCalendar | None = None,
 ) -> MultiTimeframeAnalysisRequest:
     selected = (
         (StudyExecutionSpec("volatility.atr", "0.1.0", "M5", {"atr_period": 2}),)
@@ -143,6 +154,7 @@ def _request(
         executions=selected,
         inputs_by_timeframe=supplied,
         freshness_policy=policy or FreshnessPolicy.one_timeframe_duration(),
+        session_calendar=calendar,
     )
 
 
@@ -366,6 +378,225 @@ def test_freshness_age_boundary_is_inclusive_and_stale_has_no_snapshot(
     assert stale.components[0].prepared.data_snapshot_id is not None
 
 
+def _always_open_calendar(
+    *,
+    start: datetime = CUTOFF - timedelta(days=1),
+    end: datetime = CUTOFF + timedelta(days=1),
+    closure: tuple[datetime, datetime] | None = None,
+    version: str = "calendar-v1",
+    timezone_name: str = "UTC",
+    provider_id: str = SOURCE,
+    instrument_id: str = INSTRUMENT,
+) -> SessionCalendar:
+    closures = (
+        ()
+        if closure is None
+        else (CalendarClosure(closure[0], closure[1], "synthetic closed interval"),)
+    )
+    return SessionCalendar(
+        calendar_id="synthetic.instrument",
+        version=version,
+        provider_id=provider_id,
+        instrument_id=instrument_id,
+        provenance=CalendarProvenance(
+            source="synthetic-test-fixture",
+            reference="tests/test_multitimeframe_contracts.py",
+        ),
+        timezone_name=timezone_name,
+        effective_start_utc=start,
+        effective_end_utc=end,
+        coverage_start_utc=start,
+        coverage_end_utc=end,
+        weekly_sessions=tuple(WeeklySession(day, time(0), time(23, 59)) for day in range(7)),
+        exceptional_closures=closures,
+    )
+
+
+def test_calendar_freshness_uses_independent_wall_and_open_market_ages(
+    tmp_path: Path,
+) -> None:
+    closure = (CUTOFF - timedelta(hours=1), CUTOFF)
+    calendar = _always_open_calendar(closure=closure)
+    bar_set = _bars(
+        latest_close=CUTOFF - timedelta(hours=2),
+        calendar=calendar,
+    )
+    policy = CalendarAwareFreshnessPolicy(
+        max_wall_clock_age=timedelta(hours=3),
+        max_open_market_age=timedelta(minutes=90),
+    )
+    runner, _store, _studies = _runner(tmp_path)
+
+    preflight = preflight_multi_timeframe_analysis(
+        _request(
+            inputs={"M5": bar_set},
+            policy=policy,
+            calendar=calendar,
+        ),
+        runner,
+    )
+
+    component = preflight.components[0]
+    assert component.bar_age == timedelta(hours=2)
+    assert component.open_market_age == timedelta(hours=1)
+    assert component.eligibility is PreflightEligibility.ELIGIBLE
+    assert calendar.canonical_identity()["id"] in preflight.input_manifest_json
+    assert "configuration_sha256" in preflight.input_manifest_json
+    assert '"timezone":"UTC"' in preflight.input_manifest_json
+    assert '"provenance_source":"synthetic-test-fixture"' in preflight.input_manifest_json
+    assert "max_open_market_age_microseconds" in preflight.input_manifest_json
+
+
+def test_calendar_freshness_keeps_hard_wall_clock_limit_and_unknown_fails_closed(
+    tmp_path: Path,
+) -> None:
+    runner, _store, _studies = _runner(tmp_path)
+    calendar = _always_open_calendar(closure=(CUTOFF - timedelta(hours=1), CUTOFF))
+    hard_wall_policy = CalendarAwareFreshnessPolicy(
+        max_wall_clock_age=timedelta(minutes=90),
+        max_open_market_age=timedelta(hours=3),
+    )
+    hard_wall = preflight_multi_timeframe_analysis(
+        _request(
+            inputs={"M5": _bars(latest_close=CUTOFF - timedelta(hours=2), calendar=calendar)},
+            policy=hard_wall_policy,
+            calendar=calendar,
+        ),
+        runner,
+    )
+    assert hard_wall.components[0].eligibility is PreflightEligibility.STALE
+    assert hard_wall.components[0].bar_age == timedelta(hours=2)
+
+    limited_calendar = _always_open_calendar(
+        end=CUTOFF - timedelta(hours=1),
+        version="limited-v1",
+    )
+    unknown_bars = _bars(
+        latest_close=CUTOFF - timedelta(hours=2),
+        calendar=limited_calendar,
+    )
+    unknown = preflight_multi_timeframe_analysis(
+        _request(
+            inputs={"M5": unknown_bars},
+            policy=CalendarAwareFreshnessPolicy(
+                max_wall_clock_age=timedelta(hours=3),
+                max_open_market_age=timedelta(hours=3),
+            ),
+            calendar=limited_calendar,
+        ),
+        runner,
+    )
+    assert unknown.components[0].eligibility is PreflightEligibility.ERROR
+    assert unknown.components[0].freshness_reasons == ("CALENDAR_COVERAGE_UNKNOWN",)
+
+
+def test_calendar_aware_request_rejects_mismatched_calendar_configuration() -> None:
+    calendar = _always_open_calendar()
+    different = replace(
+        calendar,
+        weekly_sessions=(WeeklySession(0, time(9), time(17)),),
+    )
+    bar_set = _bars(calendar=calendar)
+    policy = CalendarAwareFreshnessPolicy(
+        max_wall_clock_age=timedelta(hours=3),
+        max_open_market_age=timedelta(hours=3),
+    )
+
+    with pytest.raises(StudyRequestError, match="exact requested calendar identity"):
+        _request(inputs={"M5": bar_set}, policy=policy, calendar=different)
+
+
+def test_calendar_aware_request_rejects_timezone_mismatch() -> None:
+    utc_calendar = _always_open_calendar()
+    london_calendar = _always_open_calendar(timezone_name="Europe/London")
+    bar_set = _bars(calendar=utc_calendar)
+    policy = CalendarAwareFreshnessPolicy(
+        max_wall_clock_age=timedelta(hours=3),
+        max_open_market_age=timedelta(hours=3),
+    )
+
+    with pytest.raises(StudyRequestError, match="exact requested calendar identity"):
+        _request(inputs={"M5": bar_set}, policy=policy, calendar=london_calendar)
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "instrument_id"),
+    [
+        ("synthetic-other-provider", INSTRUMENT),
+        (SOURCE, "SYNTHETIC_OTHER_INSTRUMENT"),
+    ],
+)
+def test_validated_bars_reject_calendar_scope_mismatch(
+    provider_id: str,
+    instrument_id: str,
+) -> None:
+    calendar = _always_open_calendar(provider_id=provider_id, instrument_id=instrument_id)
+
+    with pytest.raises(ValueError, match="calendar scope mismatch"):
+        _bars(calendar=calendar)
+
+
+def test_legacy_freshness_records_calendar_validated_input_identity(
+    tmp_path: Path,
+) -> None:
+    runner, _store, _studies = _runner(tmp_path)
+    calendar = _always_open_calendar()
+    alternate_calendar = replace(calendar, version="calendar-v2")
+    policy = FreshnessPolicy.one_timeframe_duration()
+
+    first = preflight_multi_timeframe_analysis(
+        _request(inputs={"M5": _bars(calendar=calendar)}, policy=policy),
+        runner,
+    )
+    second = preflight_multi_timeframe_analysis(
+        _request(inputs={"M5": _bars(calendar=alternate_calendar)}, policy=policy),
+        runner,
+    )
+
+    manifest = json.loads(first.input_manifest_json)
+    assert manifest["session_calendar"] == calendar.canonical_identity()
+    assert first.input_snapshot_id != second.input_snapshot_id
+    assert manifest["freshness_policy"]["id"] == "one-timeframe-duration"
+    assert manifest["freshness_policy"]["version"] == "1.0.0"
+
+
+def test_legacy_freshness_rejects_mixed_calendar_identities() -> None:
+    first_calendar = _always_open_calendar()
+    second_calendar = replace(first_calendar, version="calendar-v2")
+    executions = (
+        StudyExecutionSpec("volatility.atr", "0.1.0", "M5", {"atr_period": 2}),
+        StudyExecutionSpec("volatility.atr", "0.1.0", "H1", {"atr_period": 2}),
+    )
+
+    with pytest.raises(StudyRequestError, match="one consistent calendar identity"):
+        _request(
+            executions,
+            {
+                "M5": _bars("M5", calendar=first_calendar),
+                "H1": _bars("H1", calendar=second_calendar),
+            },
+            policy=FreshnessPolicy.one_timeframe_duration(),
+        )
+
+
+def test_legacy_freshness_rejects_mixed_calendar_and_unscoped_inputs() -> None:
+    calendar = _always_open_calendar()
+    executions = (
+        StudyExecutionSpec("volatility.atr", "0.1.0", "M5", {"atr_period": 2}),
+        StudyExecutionSpec("volatility.atr", "0.1.0", "H1", {"atr_period": 2}),
+    )
+
+    with pytest.raises(StudyRequestError, match="cannot be mixed"):
+        _request(
+            executions,
+            {
+                "M5": _bars("M5", calendar=calendar),
+                "H1": _bars("H1"),
+            },
+            policy=FreshnessPolicy.one_timeframe_duration(),
+        )
+
+
 def test_preflight_validates_every_execution_before_any_child_execution_or_persistence(
     tmp_path: Path,
 ) -> None:
@@ -401,6 +632,43 @@ def test_runner_prepare_is_non_persisting_and_normalizes_the_run(tmp_path: Path)
     result = runner.run(request, bars)
     assert result.status is StudyStatus.AVAILABLE
     assert store.saves == 1
+
+
+def test_runner_uses_calendar_local_d1_completion_across_25_hour_day(
+    tmp_path: Path,
+) -> None:
+    calendar = _always_open_calendar(
+        timezone_name="Europe/London",
+        start=datetime(2026, 10, 23, 23, tzinfo=timezone.utc),
+        end=datetime(2026, 10, 28, tzinfo=timezone.utc),
+    )
+    previous_open = datetime(2026, 10, 23, 23, tzinfo=timezone.utc)
+    daily_open = datetime(2026, 10, 24, 23, tzinfo=timezone.utc)
+    completion = datetime(2026, 10, 26, 0, tzinfo=timezone.utc)
+    bars = ValidatedBarSet.from_bars(
+        (
+            MarketBar(INSTRUMENT, "D1", previous_open, 100, 102, 99, 101, None, SOURCE),
+            MarketBar(INSTRUMENT, "D1", daily_open, 101, 103, 100, 102, None, SOURCE),
+        ),
+        "D1",
+        completion,
+        cutoff_utc=completion,
+        calendar=calendar,
+    )
+    runner, _store, _studies = _runner(tmp_path)
+    request = StudyRunRequest(
+        "volatility.atr",
+        "0.1.0",
+        INSTRUMENT,
+        "D1",
+        completion,
+        {"atr_period": 2},
+    )
+
+    prepared = runner.prepare(request, bars)
+
+    assert prepared.latest_completed_at_utc == completion
+    assert prepared.input_window_end_utc == completion
 
 
 def test_input_manifest_is_order_independent_and_has_no_final_result_status(

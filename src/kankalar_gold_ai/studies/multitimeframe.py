@@ -17,6 +17,7 @@ from kankalar_gold_ai.core.study_results import (
     utc_z,
     validate_study_result,
 )
+from kankalar_gold_ai.data.calendar import SessionCalendar
 from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS
 from kankalar_gold_ai.data.validated import ValidatedBarSet
 from kankalar_gold_ai.studies.base import ConfigValue, validate_config_values
@@ -117,6 +118,37 @@ class FreshnessPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class CalendarAwareFreshnessPolicy:
+    """Explicit wall-clock and open-market age limits for a supplied calendar."""
+
+    max_wall_clock_age: timedelta
+    max_open_market_age: timedelta
+    policy_id: str = "calendar-open-age"
+    version: str = "1.0.0"
+
+    def __post_init__(self) -> None:
+        if self.policy_id != "calendar-open-age" or self.version != "1.0.0":
+            raise StudyRequestError("unsupported calendar-aware freshness policy identity")
+        for name, value in (
+            ("max_wall_clock_age", self.max_wall_clock_age),
+            ("max_open_market_age", self.max_open_market_age),
+        ):
+            if type(value) is not timedelta or value <= timedelta(0):
+                raise StudyRequestError(
+                    f"{name} must be an explicitly configured positive duration"
+                )
+
+    def canonical_configuration(self) -> dict[str, int]:
+        return {
+            "max_wall_clock_age_microseconds": _duration_microseconds(self.max_wall_clock_age),
+            "max_open_market_age_microseconds": _duration_microseconds(self.max_open_market_age),
+        }
+
+
+FreshnessPolicyType = FreshnessPolicy | CalendarAwareFreshnessPolicy
+
+
+@dataclass(frozen=True, slots=True)
 class StudyExecutionSpec:
     """One explicit single-timeframe study invocation in an analysis request."""
 
@@ -145,7 +177,8 @@ class MultiTimeframeAnalysisRequest:
     as_of_utc: datetime
     executions: tuple[StudyExecutionSpec, ...]
     inputs_by_timeframe: Mapping[str, TimeframeInput]
-    freshness_policy: FreshnessPolicy
+    freshness_policy: FreshnessPolicyType
+    session_calendar: SessionCalendar | None = None
 
     def __post_init__(self) -> None:
         _require_text("instrument", self.instrument)
@@ -160,8 +193,20 @@ class MultiTimeframeAnalysisRequest:
             raise StudyRequestError("executions must be a non-empty tuple")
         if any(type(execution) is not StudyExecutionSpec for execution in self.executions):
             raise StudyRequestError("executions must contain StudyExecutionSpec values")
-        if type(self.freshness_policy) is not FreshnessPolicy:
-            raise StudyRequestError("freshness_policy must be a FreshnessPolicy")
+        if type(self.freshness_policy) not in (FreshnessPolicy, CalendarAwareFreshnessPolicy):
+            raise StudyRequestError("freshness_policy is unsupported")
+        if self.session_calendar is not None and type(self.session_calendar) is not SessionCalendar:
+            raise StudyRequestError("session_calendar must be a SessionCalendar")
+        if (
+            self.session_calendar is not None
+            and self.session_calendar.instrument_id != self.instrument
+        ):
+            raise StudyRequestError("session calendar instrument scope does not match the request")
+        if (
+            type(self.freshness_policy) is CalendarAwareFreshnessPolicy
+            and self.session_calendar is None
+        ):
+            raise StudyRequestError("calendar-aware freshness requires a session calendar")
         if not isinstance(self.inputs_by_timeframe, Mapping):
             raise StudyRequestError("inputs_by_timeframe must be a mapping")
 
@@ -201,6 +246,35 @@ class MultiTimeframeAnalysisRequest:
                     raise StudyRequestError("data failure does not match its key/instrument/cutoff")
         if set(inputs) != requested:
             raise StudyRequestError("input timeframe keys must exactly match requested timeframes")
+        validated_inputs = [item for item in inputs.values() if type(item) is ValidatedBarSet]
+        has_calendar_inputs = any(
+            item.calendar_identity_json is not None for item in validated_inputs
+        )
+        has_unscoped_inputs = any(item.calendar_identity_json is None for item in validated_inputs)
+        if has_calendar_inputs and has_unscoped_inputs:
+            raise StudyRequestError(
+                "calendar-validated and non-calendar-validated inputs cannot be mixed"
+            )
+        calendar_identities = {
+            item.calendar_identity_json
+            for item in validated_inputs
+            if item.calendar_identity_json is not None
+        }
+        if len(calendar_identities) > 1:
+            raise StudyRequestError("validated inputs must use one consistent calendar identity")
+        if self.session_calendar is not None:
+            requested_identity = self.session_calendar.canonical_identity_json()
+            if any(item.calendar_identity_json != requested_identity for item in validated_inputs):
+                raise StudyRequestError(
+                    "validated inputs must use the exact requested calendar identity"
+                )
+        if type(self.freshness_policy) is CalendarAwareFreshnessPolicy:
+            assert self.session_calendar is not None
+            requested_identity = self.session_calendar.canonical_identity_json()
+            if any(item.calendar_identity_json != requested_identity for item in validated_inputs):
+                raise StudyRequestError(
+                    "validated inputs must use the exact requested calendar identity"
+                )
         object.__setattr__(self, "inputs_by_timeframe", MappingProxyType(inputs))
 
 
@@ -221,6 +295,9 @@ class PreflightComponent:
     eligibility: PreflightEligibility
     max_age: timedelta
     bar_age: timedelta | None
+    open_market_age: timedelta | None = None
+    max_open_market_age: timedelta | None = None
+    freshness_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.execution) is not StudyExecutionSpec:
@@ -233,8 +310,8 @@ class PreflightComponent:
             raise StudyRequestError("preflight max_age must be positive")
         if self.bar_age is not None and type(self.bar_age) is not timedelta:
             raise StudyRequestError("preflight bar_age must be a timedelta or None")
-        if self.max_age != _ONE_DURATION_MAX_AGES[self.execution.timeframe]:
-            raise StudyRequestError("preflight max_age does not match the fixed freshness policy")
+        if self.max_age <= timedelta(0):
+            raise StudyRequestError("preflight max_age must be positive")
         if (
             self.execution.study_id != self.prepared.study_id
             or self.execution.version != self.prepared.version
@@ -243,24 +320,56 @@ class PreflightComponent:
             raise StudyRequestError("preflight execution does not match its prepared run")
         if self.prepared.request.config != self.execution.config:
             raise StudyRequestError("prepared configuration does not match its execution")
+        calendar_aware = self.max_open_market_age is not None
+        if calendar_aware:
+            if (
+                type(self.max_open_market_age) is not timedelta
+                or self.max_open_market_age <= timedelta(0)
+                or type(self.freshness_reasons) is not tuple
+            ):
+                raise StudyRequestError("calendar freshness diagnostics are incomplete")
+        elif (
+            self.max_age != _ONE_DURATION_MAX_AGES[self.execution.timeframe]
+            or self.freshness_reasons
+        ):
+            raise StudyRequestError("preflight max_age does not match the fixed freshness policy")
         if self.prepared.data_status is DataStatus.VALID:
-            if self.bar_age is None:
+            if self.bar_age is None or (
+                calendar_aware and type(self.open_market_age) is not timedelta
+            ):
                 raise StudyRequestError("valid preflight input requires a computed bar age")
             if self.bar_age < timedelta(0):
                 raise StudyRequestError("preflight bar age must not be negative")
-            expected = (
-                PreflightEligibility.STALE
-                if self.bar_age > self.max_age
-                else (
-                    PreflightEligibility.INSUFFICIENT_DATA
-                    if self.prepared.input_bar_count is not None
+            if calendar_aware:
+                assert self.open_market_age is not None
+                assert self.max_open_market_age is not None
+                if self.open_market_age < timedelta(0):
+                    raise StudyRequestError("open-market age must not be negative")
+                if self.freshness_reasons:
+                    expected = PreflightEligibility.ERROR
+                elif self.bar_age > self.max_age or self.open_market_age > self.max_open_market_age:
+                    expected = PreflightEligibility.STALE
+                elif (
+                    self.prepared.input_bar_count is not None
                     and self.prepared.input_bar_count < self.prepared.min_bars
-                    else PreflightEligibility.ELIGIBLE
+                ):
+                    expected = PreflightEligibility.INSUFFICIENT_DATA
+                else:
+                    expected = PreflightEligibility.ELIGIBLE
+            else:
+                expected = (
+                    PreflightEligibility.STALE
+                    if self.bar_age > self.max_age
+                    else (
+                        PreflightEligibility.INSUFFICIENT_DATA
+                        if self.prepared.input_bar_count is not None
+                        and self.prepared.input_bar_count < self.prepared.min_bars
+                        else PreflightEligibility.ELIGIBLE
+                    )
                 )
-            )
         else:
             expected = PreflightEligibility(self.prepared.data_status.value)
-            if self.bar_age is not None:
+            if self.bar_age is not None or self.open_market_age is not None:
                 raise StudyRequestError("failed preflight input must not have a bar age")
         if self.eligibility is not expected:
             raise StudyRequestError("preflight eligibility does not match prepared input")
@@ -381,13 +490,16 @@ class ComponentResultEnvelope:
         }.get(self.component.eligibility)
         if expected_status is not None and self.result.status is not expected_status:
             raise StudyRequestError("component result status does not match preflight eligibility")
-        if self.component.eligibility is PreflightEligibility.STALE:
+        if self.component.eligibility is PreflightEligibility.STALE or (
+            self.component.eligibility is PreflightEligibility.ERROR
+            and self.component.freshness_reasons
+        ):
             if (
-                self.result.status is not StudyStatus.STALE
+                self.result.status is not expected_status
                 or self.result.data_snapshot_id is not None
             ):
                 raise StudyRequestError(
-                    "stale preflight input requires a STALE result without snapshot"
+                    "failed freshness preflight requires a result without snapshot"
                 )
         elif self.result.data_snapshot_id != prepared.data_snapshot_id:
             raise StudyRequestError("component result snapshot does not match preflight input")
@@ -484,26 +596,79 @@ def preflight_multi_timeframe_analysis(
             raise StudyRequestError("duplicate normalized study execution")
         identities.add(identity)
 
-        max_age = request.freshness_policy.max_age_by_timeframe[execution.timeframe]
+        policy = request.freshness_policy
+        if isinstance(policy, FreshnessPolicy):
+            max_age = policy.max_age_by_timeframe[execution.timeframe]
+            max_open_market_age = None
+        else:
+            max_age = policy.max_wall_clock_age
+            max_open_market_age = policy.max_open_market_age
         if prepared.data_status is not DataStatus.VALID:
             eligibility = PreflightEligibility(prepared.data_status.value)
             bar_age = None
+            open_market_age = None
+            freshness_reasons: tuple[str, ...] = ()
         else:
             assert prepared.latest_completed_at_utc is not None
             bar_age = request.as_of_utc - prepared.latest_completed_at_utc
             if bar_age < timedelta(0):
                 raise StudyRequestError("latest completed input bar is after the analysis cutoff")
-            if bar_age > max_age:
+            if isinstance(policy, CalendarAwareFreshnessPolicy):
+                calendar = request.session_calendar
+                assert calendar is not None
+                classification = (
+                    calendar.classify_interval(
+                        prepared.latest_completed_at_utc,
+                        request.as_of_utc,
+                    )
+                    if prepared.latest_completed_at_utc < request.as_of_utc
+                    else None
+                )
+                open_market_age = (
+                    timedelta() if classification is None else classification.open_duration
+                )
+                freshness_reasons = (
+                    ("CALENDAR_COVERAGE_UNKNOWN",)
+                    if classification is not None and classification.unknown_duration > timedelta(0)
+                    else ()
+                )
+                if freshness_reasons:
+                    eligibility = PreflightEligibility.ERROR
+                elif bar_age > max_age or open_market_age > policy.max_open_market_age:
+                    eligibility = PreflightEligibility.STALE
+                elif (
+                    prepared.input_bar_count is not None
+                    and prepared.input_bar_count < prepared.min_bars
+                ):
+                    eligibility = PreflightEligibility.INSUFFICIENT_DATA
+                else:
+                    eligibility = PreflightEligibility.ELIGIBLE
+            elif bar_age > max_age:
+                open_market_age = None
+                freshness_reasons = ()
                 eligibility = PreflightEligibility.STALE
             elif (
                 prepared.input_bar_count is not None
                 and prepared.input_bar_count < prepared.min_bars
             ):
+                open_market_age = None
+                freshness_reasons = ()
                 eligibility = PreflightEligibility.INSUFFICIENT_DATA
             else:
+                open_market_age = None
+                freshness_reasons = ()
                 eligibility = PreflightEligibility.ELIGIBLE
         prepared_components.append(
-            PreflightComponent(execution, prepared, eligibility, max_age, bar_age)
+            PreflightComponent(
+                execution,
+                prepared,
+                eligibility,
+                max_age,
+                bar_age,
+                open_market_age,
+                max_open_market_age,
+                freshness_reasons,
+            )
         )
 
     components = tuple(
@@ -535,52 +700,93 @@ def _input_manifest_json(
     component_records: list[dict[str, object]] = []
     for component in components:
         prepared = component.prepared
-        component_records.append(
-            {
-                "study_id": prepared.study_id,
-                "version": prepared.version,
-                "timeframe": component.timeframe,
-                "normalized_inputs": dict(prepared.normalized_config),
-                "data_status": prepared.data_status.value,
-                "pre_execution_eligibility": component.eligibility.value,
-                "failure_reasons": list(prepared.data_failure_reasons),
-                "source_identity": prepared.input_source,
-                "data_snapshot_id": prepared.data_snapshot_id,
-                "input_bar_count": prepared.input_bar_count,
-                "input_window_start_utc": (
-                    None
-                    if prepared.input_window_start_utc is None
-                    else utc_z(prepared.input_window_start_utc)
-                ),
-                "input_window_end_utc": (
-                    None
-                    if prepared.input_window_end_utc is None
-                    else utc_z(prepared.input_window_end_utc)
-                ),
-                "latest_completed_at_utc": (
-                    None
-                    if prepared.latest_completed_at_utc is None
-                    else utc_z(prepared.latest_completed_at_utc)
-                ),
-                "bar_age_microseconds": (
-                    None if component.bar_age is None else _duration_microseconds(component.bar_age)
-                ),
-                "max_age_microseconds": _duration_microseconds(component.max_age),
-            }
-        )
+        record: dict[str, object] = {
+            "study_id": prepared.study_id,
+            "version": prepared.version,
+            "timeframe": component.timeframe,
+            "normalized_inputs": dict(prepared.normalized_config),
+            "data_status": prepared.data_status.value,
+            "pre_execution_eligibility": component.eligibility.value,
+            "failure_reasons": list(prepared.data_failure_reasons),
+            "source_identity": prepared.input_source,
+            "data_snapshot_id": prepared.data_snapshot_id,
+            "input_bar_count": prepared.input_bar_count,
+            "input_window_start_utc": (
+                None
+                if prepared.input_window_start_utc is None
+                else utc_z(prepared.input_window_start_utc)
+            ),
+            "input_window_end_utc": (
+                None
+                if prepared.input_window_end_utc is None
+                else utc_z(prepared.input_window_end_utc)
+            ),
+            "latest_completed_at_utc": (
+                None
+                if prepared.latest_completed_at_utc is None
+                else utc_z(prepared.latest_completed_at_utc)
+            ),
+            "bar_age_microseconds": (
+                None if component.bar_age is None else _duration_microseconds(component.bar_age)
+            ),
+            "max_age_microseconds": _duration_microseconds(component.max_age),
+        }
+        if type(request.freshness_policy) is CalendarAwareFreshnessPolicy:
+            record.update(
+                {
+                    "open_market_age_microseconds": (
+                        None
+                        if component.open_market_age is None
+                        else _duration_microseconds(component.open_market_age)
+                    ),
+                    "max_open_market_age_microseconds": _duration_microseconds(
+                        request.freshness_policy.max_open_market_age
+                    ),
+                    "freshness_reasons": list(component.freshness_reasons),
+                }
+            )
+        component_records.append(record)
+    freshness_manifest: dict[str, object]
+    if isinstance(request.freshness_policy, FreshnessPolicy):
+        freshness_manifest = {
+            "id": request.freshness_policy.policy_id,
+            "version": request.freshness_policy.version,
+            "max_age_microseconds_by_timeframe": (
+                request.freshness_policy.canonical_configuration()
+            ),
+        }
+    else:
+        calendar = request.session_calendar
+        assert calendar is not None
+        freshness_manifest = {
+            "id": request.freshness_policy.policy_id,
+            "version": request.freshness_policy.version,
+        }
+        for key, value in request.freshness_policy.canonical_configuration().items():
+            freshness_manifest[key] = value
+    calendar = request.session_calendar
+    if calendar is None:
+        calendar_inputs = [
+            item
+            for item in request.inputs_by_timeframe.values()
+            if type(item) is ValidatedBarSet and item.calendar_identity_json is not None
+        ]
+        if calendar_inputs:
+            identity_json = calendar_inputs[0].calendar_identity_json
+            assert identity_json is not None
+            calendar_identity = json.loads(identity_json)
+        else:
+            calendar_identity = None
+    else:
+        calendar_identity = calendar.canonical_identity()
     return _canonical_json(
         {
             "algorithm": INPUT_IDENTITY_VERSION,
             "coordinator": {"id": COORDINATOR_ID, "version": COORDINATOR_VERSION},
             "instrument": request.instrument,
             "as_of_utc": utc_z(request.as_of_utc),
-            "freshness_policy": {
-                "id": request.freshness_policy.policy_id,
-                "version": request.freshness_policy.version,
-                "max_age_microseconds_by_timeframe": (
-                    request.freshness_policy.canonical_configuration()
-                ),
-            },
+            "freshness_policy": freshness_manifest,
+            **({"session_calendar": calendar_identity} if calendar_identity is not None else {}),
             "source_identity": source_identity,
             "components": component_records,
         }
