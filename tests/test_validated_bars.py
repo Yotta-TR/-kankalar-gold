@@ -34,6 +34,20 @@ def _bar_at(timestamp: datetime, **changes: object) -> MarketBar:
     return replace(bar, **changes)
 
 
+class _UnfilteredProvider:
+    def __init__(self, bars: tuple[MarketBar, ...]) -> None:
+        self.bars = bars
+
+    def get_bars(
+        self,
+        instrument: str,
+        timeframe: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> tuple[MarketBar, ...]:
+        return self.bars
+
+
 def test_validated_bar_set_preserves_report_and_normalizes_time() -> None:
     offset = timezone(timedelta(hours=2))
     bars = tuple(
@@ -245,6 +259,97 @@ def test_existing_retrieval_still_returns_tuple_and_mock_needs_no_network() -> N
 
     assert isinstance(bars, tuple)
     assert bars == SYNTHETIC_BARS
+
+
+def test_retrieval_accepts_requested_instrument_without_calendar() -> None:
+    pipeline = HistoricalDataPipeline(_UnfilteredProvider(SYNTHETIC_BARS), clock=lambda: NOW)
+
+    assert pipeline.retrieve_bars("TEST_GOLD", "M5", NOW, history_days=1) == SYNTHETIC_BARS
+
+
+@pytest.mark.parametrize("returned_instrument", ["OTHER_GOLD", ""])
+def test_raw_retrieval_rejects_different_or_unverifiable_instrument_without_calendar(
+    returned_instrument: str,
+) -> None:
+    bar = replace(SYNTHETIC_BARS[-1], instrument=returned_instrument)
+    pipeline = HistoricalDataPipeline(_UnfilteredProvider((bar,)), clock=lambda: NOW)
+
+    with pytest.raises(HistoricalDataQualityError) as error:
+        pipeline.retrieve_bars("TEST_GOLD", "M5", NOW, history_days=1)
+
+    assert error.value.report.status is DataStatus.ERROR
+    assert "INSTRUMENT_MISMATCH" in error.value.report.reasons
+
+
+def test_latest_complete_bar_rejects_different_instrument_without_calendar() -> None:
+    latest_time = NOW + timedelta(minutes=2)
+    bar = _bar_at(NOW - timedelta(minutes=5), instrument="OTHER_GOLD")
+    pipeline = HistoricalDataPipeline(_UnfilteredProvider((bar,)), clock=lambda: latest_time)
+
+    with pytest.raises(HistoricalDataQualityError) as error:
+        pipeline.latest_complete_bar("TEST_GOLD", "M5")
+
+    assert error.value.report.status is DataStatus.ERROR
+    assert "INSTRUMENT_MISMATCH" in error.value.report.reasons
+
+
+def test_check_coverage_reports_different_instrument_without_calendar() -> None:
+    bar = SYNTHETIC_BARS[-1]
+    pipeline = HistoricalDataPipeline(
+        _UnfilteredProvider((replace(bar, instrument="OTHER_GOLD"),)), clock=lambda: NOW
+    )
+
+    report = pipeline.check_coverage("TEST_GOLD", "M5", bar.timestamp_utc, bar.timestamp_utc)
+
+    assert report.status is DataStatus.ERROR
+    assert "INSTRUMENT_MISMATCH" in report.reasons
+
+
+def test_validated_retrieval_retains_instrument_protection_without_calendar() -> None:
+    bar = replace(SYNTHETIC_BARS[-1], instrument="OTHER_GOLD")
+    pipeline = HistoricalDataPipeline(_UnfilteredProvider((bar,)), clock=lambda: NOW)
+
+    with pytest.raises(HistoricalDataQualityError) as error:
+        pipeline.retrieve_validated_bars("TEST_GOLD", "M5", NOW, history_days=1)
+
+    assert error.value.report.status is DataStatus.ERROR
+    assert "INSTRUMENT_MISMATCH" in error.value.report.reasons
+
+
+def test_empty_history_and_provider_errors_keep_existing_behavior() -> None:
+    latest_time = NOW + timedelta(minutes=2)
+    empty_pipeline = HistoricalDataPipeline(_UnfilteredProvider(()), clock=lambda: latest_time)
+    with pytest.raises(HistoricalDataQualityError) as retrieval_error:
+        empty_pipeline.retrieve_bars("TEST_GOLD", "M5", NOW, history_days=1)
+    assert retrieval_error.value.report.reasons == ("EMPTY_HISTORY",)
+    assert empty_pipeline.latest_complete_bar("TEST_GOLD", "M5") is None
+    coverage = empty_pipeline.check_coverage("TEST_GOLD", "M5", NOW - timedelta(minutes=5), NOW)
+    assert coverage.status is DataStatus.INSUFFICIENT_DATA
+    assert coverage.reasons == ("EMPTY_HISTORY",)
+
+    provider_error = RuntimeError("synthetic provider failure")
+
+    class FailingProvider:
+        def get_bars(
+            self,
+            instrument: str,
+            timeframe: str,
+            start_utc: datetime,
+            end_utc: datetime,
+        ) -> tuple[MarketBar, ...]:
+            raise provider_error
+
+    failing_pipeline = HistoricalDataPipeline(FailingProvider(), clock=lambda: latest_time)
+    operations = (
+        lambda: failing_pipeline.retrieve_bars("TEST_GOLD", "M5", NOW, history_days=1),
+        lambda: failing_pipeline.retrieve_validated_bars("TEST_GOLD", "M5", NOW, history_days=1),
+        lambda: failing_pipeline.latest_complete_bar("TEST_GOLD", "M5"),
+        lambda: failing_pipeline.check_coverage("TEST_GOLD", "M5", NOW - timedelta(minutes=5), NOW),
+    )
+    for operation in operations:
+        with pytest.raises(RuntimeError) as error:
+            operation()
+        assert error.value is provider_error
 
 
 def test_cutoff_is_required_and_independent_of_validation_time() -> None:

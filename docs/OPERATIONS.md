@@ -12,8 +12,29 @@ in logs or commit them; `.env` and `.env.*` are ignored, with only the
 placeholder-only `.env.example` allowed. Runtime data belongs under ignored
 `data/`, never in source control.
 
-Future integrations require bounded retries, timeouts, health reporting,
-idempotent jobs, graceful shutdown, and independently reviewed read-only access.
+The injected MT5 adapter remains disabled by default and has only been exercised
+with fakes. `connect()` uses three bounded initialization attempts with a
+60-second MT5 initialization timeout and exponential backoff; historical rate
+and tick calls retry raised client exceptions at most three times. Empty history
+and malformed records are reported directly, not retried. MT5's history
+functions do not expose a request-timeout argument, so an in-flight synchronous
+history call cannot be safely interrupted by this adapter. Do not treat the
+bounded retries as a hard end-to-end request deadline.
+
+Use `run_pipeline_study` to bind a study request's UTC cutoff to
+`retrieve_validated_bars`. Typed quality failures, empty history, and provider
+errors are persisted as non-computing study results with status and stable
+source/reason evidence. Invalid requests and unclassified exceptions still
+raise. The helper is an offline integration seam; it does not initialize MT5.
+
+SQLite schema v4 upgrades quote and tick tables transactionally. Event identity
+excludes retrieval time: exact repeated events are rejected, while distinct
+updates sharing a timestamp are retained in insertion order. Persistence APIs
+are insert-only; direct edits to the database are not prevented by triggers.
+
+Future integrations require bounded retries, supported timeouts, health
+reporting, idempotent jobs, graceful shutdown, and independently reviewed
+read-only access.
 
 The AST safety scan allows MT5 imports only in `adapters/mt5` and only from the
 read-only API allowlist in `security/trading_safety.py`. Phase 0.1 prohibits web

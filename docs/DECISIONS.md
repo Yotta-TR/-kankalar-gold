@@ -217,3 +217,137 @@
   path. A neutral state does not assert a sideways market.
 - **Scope:** This is not a forecast, trading recommendation or probability.
   No cross-timeframe combination, external data, or ATR dependency is added.
+
+## ADR-013: Wilder DMI/ADX descriptive study
+
+- **Decision:** Implement `trend.adx_dm` v0.1.0 as independent single-timeframe
+  runs on M1, M5, M15, H1, H4 and D1. The master specification names ADX and
+  directional movement but leaves the formula and period unresolved; this ADR
+  records implementation choices rather than changing the canonical spec.
+- **Configuration and indexing:** Require exactly one explicit
+  `adx_period`, a built-in integer of at least 2, excluding booleans; use no
+  default or maximum. Omit the first supplied bar's DM/TR observation, seed
+  Wilder-smoothed sums from the next N observations, seed ADX from the first N
+  DX values, and require `2 * adx_period` bars for the first output at index
+  `2 * adx_period - 1`. Process every supplied observation; minimum warm-up is
+  not a convergence guarantee.
+- **Zero policy:** Exact zero smoothed TR with zero DM yields zero DIs and DX;
+  positive TR with both DM sums zero also yields zero DIs and DX. Include zero
+  DX in ADX initialization and recurrence. ADX decays when computed DX is zero;
+  zero raw DM alone does not force zero DX, since residual one-sided smoothed DM
+  can preserve dominance. Zero TR with non-zero DM is an arithmetic invariant
+  error. No epsilon/tolerance is used. This differs from TA-Lib zero handling
+  and is intentional project behavior.
+- **Numerics and output:** Compute signed normalized DI dominance from scaled
+  smoothed DM sums, not from already divided DIs, so subnormal DI underflow
+  does not erase dominance. Reject non-finite arithmetic or values outside
+  mathematical bounds through the runner's snapshot-bound `ERROR` path; do
+  not clamp. `StudyOutput` remains unchanged: `value` is ADX,
+  `normalized_value` is dominance or `None` when both DMs are zero, state and
+  direction represent DI dominance, and evidence carries formatted latest
+  +DI/-DI for human audit. Separate first-class DI fields require a future
+  shared-contract decision.
+- **Scope:** OHLC only; no volume, threshold, default period, cross-timeframe
+  fusion, prediction, or trading recommendation is introduced. Existing
+  runner, coordinator, cache, persistence, and SQLite schema remain unchanged.
+
+## ADR-014: Explicit session calendars and closure-aware freshness
+
+- **Decision:** Represent broker/instrument schedules as an immutable,
+  versioned `SessionCalendar` scoped to an explicit provider and instrument,
+  with source provenance and reference, IANA timezone, effective interval,
+  separate UTC coverage interval, weekly local-time sessions, holidays, and
+  exceptional UTC closures. Effective dates define when a schedule applies;
+  coverage dates define the portion for which the schedule is known and may
+  classify intervals. Coverage must lie within the effective interval. No
+  broker schedule, timezone, or freshness threshold is supplied by default.
+- **Gap handling:** The MT5 adapter validates record integrity and bounds but
+  does not classify session gaps. The historical pipeline and
+  `ValidatedBarSet` apply the caller's calendar after verifying its provider
+  and instrument scope before gap classification; a mismatch raises
+  `ValueError`. Empty input cannot establish provider identity. The current
+  MT5 source label `mt5` identifies the adapter type, not a unique broker/server;
+  a production broker calendar requires a stable provider/broker source
+  identity. Known closures remain distinguishable from missing
+  bars during open intervals and unknown calendar coverage; unknown coverage
+  fails closed. The legacy `expected_open` callback remains unversioned
+  compatibility input and cannot satisfy calendar-aware freshness.
+- **DST:** Local session boundaries are converted with IANA timezone rules.
+  Ambiguous local boundaries require an explicit `fold`; nonexistent local
+  boundaries fail instead of being silently normalized. A local midnight to
+  the next local midnight is a valid full-day session and may have 23 or 25
+  elapsed UTC hours across DST transitions.
+- **D1 semantics:** With an explicit `SessionCalendar`, D1 bars are local
+  calendar days in that calendar's timezone, from local midnight to the next
+  local midnight; elapsed duration may be 23, 24, or 25 UTC hours. Without a
+  calendar, legacy D1 validation and completion remain fixed 24-hour UTC
+  intervals. The `one-timeframe-duration` v1.0.0 freshness limit remains a
+  fixed 24-hour wall-clock age and is not changed by this interpretation.
+- **Freshness:** Preserve `one-timeframe-duration` v1.0.0 unchanged. Add
+  `calendar-open-age` v1.0.0 with explicitly configured maximum wall-clock and
+  open-market ages. The hard wall-clock limit always applies; unknown calendar
+  intervals fail closed, and no reopening grace interval is inferred.
+- **Identity:** Calendar ID, version, scope, provenance, timezone, effective
+  and coverage intervals, full configuration fingerprint, freshness
+  policy/configuration, both age measures, and diagnostics participate in
+  calendar-aware multi-timeframe input identity. Validated bars retain the
+  complete deterministic calendar identity.
+- **Compatibility and limits:** No production broker calendar is configured
+  or validated. Synthetic calendar tests explicitly identify synthetic
+  providers, instruments, and provenance; they establish contract behavior
+  only. Actual schedule authority, schedule data, and numeric freshness limits
+  require explicit operational configuration and separate verification.
+- **Scope:** This decision changes only Phase 1 data-quality and freshness
+  boundaries. It does not add studies, trading behavior, or persistence schema.
+
+## ADR-015: Bounded retries and connection timeout for the read-only MT5 adapter
+
+- **Decision:** Bound MT5 initialization to three attempts, pass the supported
+  60-second timeout to `initialize()`, and use bounded exponential backoff.
+  Raised client exceptions during historical bar/tick calls are retried at most
+  three times; empty responses and malformed data are not retried.
+- **Error behavior:** A terminal `False` initialization result is checked
+  against `last_error()`. Failed or interrupted initialization retains a
+  cleanup obligation, and shutdown errors remain visible. Retry exhaustion
+  surfaces the final chained adapter error.
+- **Timeout limitation:** MT5 historical range functions expose no request
+  timeout parameter. The adapter does not move those calls to abandonable
+  threads or claim a hard request deadline; a synchronous call can exceed the
+  retry bound before returning. This remains an operational limitation until a
+  cancellable client mechanism is available.
+- **Scope:** No terminal connection is made by tests; all retry and timeout
+  behavior is validated with deterministic fake clients. No trading API is
+  added.
+
+## ADR-016: Quote and tick event identity in SQLite schema v4
+
+- **Decision:** Preserve separate tick/quote events even when instrument,
+  source, and UTC timestamp are identical. Schema v4 gives each stored event an
+  append-order row ID and a unique hash of its market identity fields; retrieval
+  timestamps are excluded so rereading an identical event remains a duplicate.
+- **Reason:** MT5 can report distinct updates with the same millisecond
+  timestamp. The prior composite primary key rejected one of those updates and
+  could lose market information.
+- **Migration:** Rebuild both event tables inside the existing `BEGIN IMMEDIATE`
+  schema-upgrade transaction, preserve every prior row and its insertion order,
+  and recreate source lookup indexes. A failed migration rolls back table
+  changes and the schema version together.
+- **Scope and limits:** This is event deduplication, not a guarantee that all
+  provider event IDs are globally unique. Persistence methods append only;
+  direct database edits remain possible and are outside the application API.
+
+## ADR-017: Fail-closed pipeline-to-study execution
+
+- **Decision:** `run_pipeline_study` retrieves `ValidatedBarSet` input at the
+  study request's UTC cutoff and invokes `StudyRunner` only on success. Typed
+  historical quality, empty-history, and provider-access failures are mapped
+  to the corresponding non-VALID `StudyStatus` and persisted without
+  computation. Provider source and stable reason codes are retained as audit
+  evidence; unclassified exceptions propagate.
+- **Status mapping:** `DataStatus` and `StudyStatus` share the current values
+  except `VALID`/`AVAILABLE`; only valid data reaches normal study execution.
+  The runner preserves each non-VALID data status one-to-one. The bridge emits
+  `INSUFFICIENT_DATA` for empty/quality-short history and `ERROR` for provider
+  access failures.
+- **Scope:** This bridge does not add retries to studies, suppress invalid
+  request/configuration errors, or make multi-component persistence atomic.

@@ -1,8 +1,9 @@
 # Study Catalogue
 
-Status: This catalogue documents research candidates. `volatility.atr` and
-`trend.ma_slope_order` are implemented as descriptive studies; listing or
-implementation does not imply predictive approval or ensemble activation.
+Status: This catalogue documents research candidates. `volatility.atr`,
+`trend.ma_slope_order`, and `trend.adx_dm` are implemented as descriptive
+studies; listing or implementation does not imply predictive approval or
+ensemble activation.
 This catalogue organizes the research candidates of Sections 5.1–5.6 of
 [`KANKALAR_GOLD_AI_MASTER_SPEC_v0.1.md`](../KANKALAR_GOLD_AI_MASTER_SPEC_v0.1.md)
 (the "master spec", which remains canonical) into implementable specification
@@ -69,15 +70,16 @@ Checked against the repository (not assumed):
 | Bars/ticks/quotes | `MarketBar` carries instrument, timeframe, UTC timestamp, OHLC, `volume`, `tick_volume`, `real_volume`, `spread_points`, `source`, `retrieved_at_utc`. `MarketTick` and `MarketQuote` carry bid/ask/last, `source`, `retrieved_at_utc`. |
 | Timeframes | `HistoricalDataPipeline` supports `M1, M5, M15, H1, H4, D1`; retrieval is bounded to 366 days. |
 | Fail-closed bar ingestion (`data/pipeline.py`) | `HistoricalDataPipeline.retrieve_bars` and `latest_complete_bar` validate **bars only** and raise `HistoricalDataQualityError` (carrying the `DataQualityReport`) for any status other than `VALID`. |
-| Quotes and ticks | `data/quality.py` has `validate_quote` (returns a `DataQualityReport`; checks finite/invalid bid-ask, future and stale timestamps, spread limit). No tick validator was found. Quotes and ticks do not pass through `HistoricalDataPipeline`; persistence methods `save_market_quote` and `save_market_ticks` exist, and the MT5 provider has `get_ticks`. No fail-closed quote/tick ingestion path equivalent to the bar pipeline exists **[TBD]**. |
+| Quotes and ticks | `validate_quote` reports non-finite/crossed/non-positive bid/ask, future or stale timestamps, inconsistent milliseconds, invalid last, and excessive spread. The MT5 adapter validates tick timestamp/range, finite and non-negative price values, bid/ask ordering, flags, changed-field consistency, exact duplicate records, and out-of-order events; distinct updates sharing a timestamp are preserved. Empty tick history has a typed missing-data error. Quotes and ticks still do not pass through a shared `ValidatedQuote`/`ValidatedTick` study pipeline; quote freshness/spread thresholds must be explicitly checked by the caller **[TBD]**. |
 | Instrument | The logical project identity is `GOLD_USD` [SPEC §19]; the broker symbol is `null` until discovered and confirmed from MT5 [SPEC §19]. It is commonly labelled XAUUSD, but the exact symbol is unresolved. |
-| Gap semantics (`data/quality.py`) | Without a caller-supplied `expected_open` session callback, gaps are reported as `GAP_SESSION_UNKNOWN` rather than missing data; weekends/closures are not assumed to be errors. No built-in market calendar exists. |
-| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row (see ADR-007). Bars, ticks, quotes, instrument specifications, data-quality events and provider-health events are also written source-aware. Schema version 3. |
+| Gap semantics (`data/calendar.py`, `data/quality.py`) | Gaps are classified with an explicit broker/instrument calendar. Known closures are retained as valid-quality diagnostics, open-session missing bars and unknown calendar coverage fail closed. The typed calendar contract has no broker schedule or timezone defaults; all calendar tests use synthetic schedules. |
+| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON (`inputs_json`, `evidence_json`, `limitations_json`). Schema v3 adds `provenance_json` and `cache_format_version`; schema v4 rebuilds quote/tick tables with event identities so distinct updates at one timestamp are retained while exact repeats are rejected. `find_cached_study_result` strictly deserializes and validates the newest cache-eligible row (see ADR-007). Data-record writes are insert-only through the persistence API; schema migrations and each write batch are transactional. Schema version 4. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
 | Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. |
+| Pipeline failure integration | `studies.pipeline_execution.run_pipeline_study` runs only validated bars; known quality, empty-history, and typed provider failures become persisted non-computing `StudyResult`s with status/reason/source evidence. Other request/programming errors still propagate. |
 | Multi-timeframe coordination | `studies/multitimeframe.py` defines requests and complete preflight; `studies/multitimeframe_coordinator.py` executes the independent runs in canonical order after preflight. |
 | Runner preparation | `StudyRunner.prepare` validates and normalizes one request/input pair and computes its individual snapshot metadata without cache lookup, computation or persistence. |
-| Not present | No market/session calendar, no macro/COT/futures adapters, no volume-profile or order-book data. |
+| Not present | No configured/verified broker calendar schedule, no macro/COT/futures adapters, no volume-profile or order-book data. |
 
 ### 3.1 Multi-timeframe coordination
 
@@ -90,6 +92,40 @@ Checked against the repository (not assumed):
   maximum age for every supported timeframe. The limit is inclusive and has no
   automatic weekend or closure exemption. Candle completion time is open time
   plus timeframe duration.
+- A separate `calendar-open-age` v1.0.0 policy requires explicit wall-clock
+  and open-market age limits plus one explicit `SessionCalendar`. Its manifest
+  records the calendar identity/configuration fingerprint, policy configuration,
+  wall-clock age, open-market age, and unknown-coverage diagnostics. It has no
+  post-reopening grace period; unknown calendar coverage fails closed.
+- `SessionCalendar` represents local weekly sessions, overnight sessions,
+  holidays, exceptional UTC closures, and separate effective and coverage
+  intervals. Effective dates define when a schedule applies; coverage dates
+  define where its schedule information is known. Every calendar explicitly
+  names its provider, instrument, provenance source/reference, and IANA
+  timezone, and validated inputs cannot reuse it for another provider or
+  instrument. IANA timezone rules are used for DST. Ambiguous local schedule
+  boundaries require an explicit fold; nonexistent boundaries fail rather
+  than being guessed.
+- Calendar scope is checked before gap classification in both raw and validated
+  paths; a mismatch raises `ValueError`. Empty input can be checked against an
+  explicitly requested instrument but cannot establish a provider identity.
+  The MT5 adapter's current source value `mt5` identifies the adapter type, not
+  a unique broker/server. A production broker calendar requires a stable,
+  explicitly configured broker/provider source identity.
+- D1 bars use local midnight-to-midnight boundaries only when validated with an
+  explicit calendar; these days may span 23, 24, or 25 UTC hours. Without a
+  calendar, existing D1 behavior remains fixed 24-hour UTC intervals. The
+  `one-timeframe-duration` v1.0.0 freshness limit remains fixed at 24 hours.
+  Calendar-scoped D1 `latest_complete_bar` searches a configurable 1–366 UTC
+  day lookback (default 366), excludes the current local day, and fails closed
+  if a trailing gap contains open time or unknown calendar coverage. With no
+  completed candidates, it returns no bar only when the search interval is
+  fully known closed. Empty history cannot establish a provider identity.
+  Every calendar-validated bar's entire half-open interval must be covered.
+- Legacy `expected_open` callbacks remain supported for historical bar
+  validation, but they have no stable identity/version and cannot satisfy the
+  calendar-aware freshness policy. No real broker schedule has been validated;
+  calendar tests use synthetic schedules only.
 - Preflight prepares every single-timeframe request and rejects normalized
   duplicate execution identities before any component execution or persistence.
 - The canonical input identity excludes final study-result statuses. The
@@ -149,8 +185,10 @@ statuses to stay distinct but does not define this table):
 
 The runner maps a caller-supplied `DataFailure` one-to-one to the same-named `StudyStatus`. The coordinator also maps stale validated bars to a `STALE` failure without computing. The bar pipeline does not automatically produce a `DataFailure`; invalid data never reaches `compute`.
 
-The fixed coordinator freshness policy has no weekend or closure exemption;
-a session-aware policy remains **[TBD]**.
+The existing fixed coordinator freshness policy has no weekend or closure
+exemption. The separate calendar-aware policy is implemented for explicit
+calendar inputs; the actual broker schedule, timezone, exceptional closures,
+freshness thresholds, and calendar source remain **[TBD]**.
 
 ### 4.4 Common closed-bar / point-in-time behavior
 
@@ -260,14 +298,14 @@ are correlated with each other and must be grouped (§2).
 | ID | Candidate | Spec definition | Parameters (spec-supported) | Output/states |
 |---|---|---|---|---|
 | `trend.ma_slope_order` | SMA slope and ordering | Descriptive fast/middle/slow SMA ordering and fast-SMA slope | v0.1.0 uses explicit periods, lookback and flat threshold; no defaults | Nine ordering/slope states; jointly aligned up/down gives `BULLISH`/`BEARISH`, otherwise `NEUTRAL` |
-| `trend.adx_dm` | ADX and directional movement | Named only | Period **[TBD]** | Trend strength and directional movement **[TBD]**; formula not defined in spec |
+| `trend.adx_dm` | ADX and directional movement | Named only; formula and period remain unspecified in the master spec | v0.1.0 requires explicit `adx_period >= 2`; no default | ADX plus DI dominance; see §6.2 |
 | `trend.rsi` | RSI level, slope, regime-aware interpretation | Level and slope; interpretation depends on regime | Period/levels **[TBD]** | Level/slope; regime dependence implies a link to Group 4 **[TBD]** |
 | `trend.macd` | MACD | Level, signal relationship, histogram change, zero-line context | Fast/slow/signal **[TBD]** | Components above; states **[TBD]** |
 | `trend.roc_momentum` | Rate of Change / momentum | Over multiple horizons | Horizons **[TBD]** | Per-horizon values; `inputs` is flat so horizons are encoded as scalar keys **[SUGGESTION]** |
 | `trend.donchian` | Donchian channel position and breakout state | Position within channel; breakout state | Lookback **[TBD]**; whether the current forming bar is excluded must follow closed-bar rule | Position, breakout state **[TBD]** |
 | `trend.atr_trend` | Supertrend or other ATR-based trend descriptors | "As candidates, not assumed superior" | ATR period/multiplier **[TBD]** | State **[TBD]**; repainting-prone indicators need explicit tests |
 
-For the other six entries, warm-up is **[TBD]** (must emit
+For entries that remain unimplemented, warm-up is **[TBD]** (must emit
 `INSUFFICIENT_DATA` before it is met); data-quality dependency: `VALID` bars
 for the full lookback; specific tests: warm-up boundary, closed-bar only,
 missing bar behavior, no-lookahead; out-of-sample: §4.6, metric **[TBD]**.
@@ -312,6 +350,62 @@ predictive contribution. `trend.atr_trend` additionally depends on the ATR study
   evaluated, not assumed independent. Synthetic tests cover numerical examples,
   all states, boundaries, configuration, warm-up, numerical failures, data
   quality, no-lookahead, all timeframes, caching and SQLite persistence.
+
+### 6.2 `trend.adx_dm` v0.1.0
+
+- **Canonical boundary:** The master specification names ADX and directional
+  movement but does not define the formula, period, zero-denominator behavior,
+  or outputs. The choices below are implementation decisions, not additions to
+  the canonical specification.
+- **Configuration and warm-up:** Exactly one required field,
+  `adx_period`, is a built-in integer of at least 2; booleans, floats, missing
+  values, and unknown keys are rejected. There is no implicit default or
+  maximum. The first ADX is computable at bar index `2 * adx_period - 1`,
+  requiring `2 * adx_period` bars. This is a first-computable-output boundary,
+  not a convergence or stability guarantee.
+- **Formula:** For each adjacent supplied pair, +DM is the positive high
+  increase only when it strictly exceeds the downward low move; -DM is the
+  positive low decrease only when it strictly exceeds the upward high move.
+  Equal positive moves yield zero for both. True Range is the maximum of
+  current high-low and the absolute current-high/low to previous-close gaps.
+  The first supplied bar contributes no observation. The first `N` DM and TR
+  observations are summed with `math.fsum`; later sums use Wilder's
+  `S = S - S/N + current` recurrence. DI is `100 * (smoothed_DM / smoothed_TR)`.
+  DX is `100 * abs((+DI - -DI) / (+DI + -DI))`, evaluated equivalently from
+  scaled DM sums for numerical stability. The first ADX is the mean of the
+  first `N` DX values using `math.fsum`; subsequent ADX uses
+  `(previous_ADX * (N - 1) + current_DX) / N`. No historical integer rounding
+  is applied.
+- **Zero policy:** Exact zero smoothed TR with zero DM defines both DIs and DX
+  as zero. Positive TR with both DM sums zero also defines both DIs and DX as
+  zero; each zero DX participates in ADX seeding and recurrence. ADX decays
+  when its computed DX is zero; zero raw DM alone does not force zero DX because
+  residual one-sided smoothed DM can preserve DI dominance. Zero TR with
+  non-zero DM is an arithmetic invariant failure. No epsilon is used. This
+  policy is explicit project behavior and is not exact TA-Lib parity, whose
+  zero handling differs.
+- **Outputs:** `value` is ADX in `[0, 100]`. `normalized_value` is scaled
+  signed DI dominance in `[-1, 1]`, or `None` when both DM sums are zero.
+  `state` is `PLUS_DI_DOMINANT`, `MINUS_DI_DOMINANT`, or `DI_BALANCED`;
+  direction is respectively `BULLISH`, `BEARISH`, or `NEUTRAL`, based only on
+  the smoothed DM comparison. Evidence includes latest ADX, both DIs, DX,
+  period, and zero-denominator case with stable numeric formatting. Evidence is
+  for human audit, not a substitute for first-class numeric fields; the shared
+  result contract has no dedicated +DI and -DI values.
+- **Execution and limits:** Supports independent M1, M5, M15, H1, H4, and D1
+  runs over validated completed OHLC bars. Adjacent supplied bars define
+  observations; accepted closure gaps are not filled with synthetic bars.
+  Positive subnormal arithmetic is allowed when finite. Non-finite arithmetic,
+  overflow, or violated mathematical bounds follow the runner's `ERROR` path
+  with the input snapshot. This is a lagging, parameter-sensitive description,
+  not a prediction, strength-threshold classification, or trading
+  recommendation. It uses no volume, external data, or live connection and is
+  correlated with MA slope/order and ATR-related range information.
+- **Tests:** Synthetic tests cover hand-calculated DI/ADX values, DM selection,
+  Wilder initialization and recurrence, exact warm-up, zero cases, numerical
+  boundaries, all timeframes, closure and unknown gaps, F4 future-mutation
+  independence, cache/SQLite behavior, coordinator stale and explicit failures,
+  and non-available result fields.
 
 ## 7. Group 2 — Market structure and price action [SPEC §5.2]
 

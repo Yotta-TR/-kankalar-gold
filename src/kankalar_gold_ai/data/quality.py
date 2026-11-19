@@ -12,6 +12,11 @@ from kankalar_gold_ai.core.contracts import (
     MarketQuote,
     as_utc,
 )
+from kankalar_gold_ai.data.calendar import (
+    SessionCalendar,
+    local_day_completion_utc,
+    validate_calendar_scope,
+)
 
 TIMEFRAME_DURATIONS = {
     "M1": timedelta(minutes=1),
@@ -31,6 +36,26 @@ def _finite_real(value: object, *, positive: bool = False) -> bool:
     except (OverflowError, TypeError, ValueError):
         return False
     return math.isfinite(numeric) and (numeric > 0 if positive else numeric >= 0)
+
+
+def bar_completion_utc(
+    timestamp_utc: datetime,
+    timeframe: str,
+    calendar: SessionCalendar | None = None,
+    *,
+    timezone_name: str | None = None,
+) -> datetime:
+    """Return bar completion; calendar-scoped D1 bars use local calendar days."""
+    timestamp = as_utc(timestamp_utc)
+    if timeframe == "D1":
+        if calendar is not None:
+            return calendar.next_local_day_boundary(timestamp)
+        if timezone_name is not None:
+            return local_day_completion_utc(timestamp, timezone_name)
+    try:
+        return timestamp + TIMEFRAME_DURATIONS[timeframe]
+    except KeyError as error:
+        raise ValueError(f"unsupported timeframe: {timeframe}") from error
 
 
 def validate_quote(
@@ -64,9 +89,47 @@ def validate_bars(
     now: datetime,
     *,
     expected_open: Callable[[datetime], bool] | None = None,
+    calendar: SessionCalendar | None = None,
+    expected_instrument: str | None = None,
 ) -> DataQualityReport:
-    """Only classify gaps as missing when a caller supplies a session calendar."""
+    """Validate bars and classify gaps only with explicit, correctly scoped sessions.
+
+    A calendar provider/instrument mismatch raises ``ValueError`` before any
+    gap classification. Each complete half-open bar interval must be covered.
+    Empty histories can check an explicit instrument scope, but cannot establish
+    provider scope.
+    """
+    if calendar is not None:
+        validate_calendar_scope(
+            calendar,
+            bars,
+            expected_instrument=expected_instrument,
+        )
+    return _validate_bars(
+        bars,
+        timeframe,
+        now,
+        expected_open=expected_open,
+        calendar=calendar,
+        classify_gaps=True,
+        expected_instrument=expected_instrument,
+    )
+
+
+def _validate_bars(
+    bars: tuple[MarketBar, ...],
+    timeframe: str,
+    now: datetime,
+    *,
+    expected_open: Callable[[datetime], bool] | None,
+    calendar: SessionCalendar | None,
+    classify_gaps: bool,
+    check_completion: bool = True,
+    expected_instrument: str | None = None,
+) -> DataQualityReport:
     now = as_utc(now)
+    if expected_open is not None and calendar is not None:
+        raise ValueError("provide calendar or expected_open, not both")
     if not isinstance(timeframe, str) or timeframe not in TIMEFRAME_DURATIONS:
         raise ValueError(f"unsupported timeframe: {timeframe}")
     if not bars:
@@ -79,7 +142,11 @@ def validate_bars(
     source = bars[0].source
     for bar in bars:
         timestamp = bar.timestamp_utc
+        if not isinstance(bar.instrument, str) or not bar.instrument.strip():
+            reasons.add("INVALID_INSTRUMENT")
         if bar.instrument != instrument:
+            reasons.add("INSTRUMENT_MISMATCH")
+        if expected_instrument is not None and bar.instrument != expected_instrument:
             reasons.add("INSTRUMENT_MISMATCH")
         if bar.source != source:
             reasons.add("SOURCE_MISMATCH")
@@ -89,13 +156,30 @@ def validate_bars(
             reasons.add("DUPLICATE_BAR")
         if previous is not None and timestamp < previous:
             reasons.add("OUT_OF_ORDER")
-        if previous is not None and timestamp > previous + duration:
-            if expected_open is None:
+        previous_end = (
+            None if previous is None else bar_completion_utc(previous, timeframe, calendar)
+        )
+        if classify_gaps and previous_end is not None and timestamp > previous_end:
+            if calendar is not None:
+                if (timestamp - previous_end) // duration > 100_000:
+                    raise ValueError("gap exceeds the supported calendar-check bound")
+                missing = previous_end
+                while missing < timestamp:
+                    missing_end = bar_completion_utc(missing, timeframe, calendar)
+                    classification = calendar.classify_interval(missing, missing_end)
+                    if classification.open_duration > timedelta(0):
+                        reasons.add("MISSING_BAR")
+                    if classification.unknown_duration > timedelta(0):
+                        reasons.add("CALENDAR_COVERAGE_UNKNOWN")
+                    elif classification.open_duration == timedelta(0):
+                        reasons.add("KNOWN_MARKET_CLOSURE")
+                    missing = missing_end
+            elif expected_open is None:
                 reasons.add("GAP_SESSION_UNKNOWN")
             else:
-                if (timestamp - previous) // duration > 100_000:
+                if (timestamp - previous_end) // duration > 100_000:
                     raise ValueError("gap exceeds the supported calendar-check bound")
-                missing = previous + duration
+                missing = previous_end
                 while missing < timestamp:
                     if expected_open(missing):
                         reasons.add("MISSING_BAR")
@@ -103,7 +187,15 @@ def validate_bars(
                     missing += duration
         seen.add(timestamp)
         previous = timestamp
-        if timestamp + duration > now:
+        completion = bar_completion_utc(timestamp, timeframe, calendar)
+        if calendar is not None and (
+            timestamp < calendar.effective_start_utc
+            or completion > calendar.effective_end_utc
+            or timestamp < calendar.coverage_start_utc
+            or completion > calendar.coverage_end_utc
+        ):
+            reasons.add("CALENDAR_COVERAGE_UNKNOWN")
+        if check_completion and completion > now:
             reasons.add("INCOMPLETE_BAR")
         prices = (bar.open, bar.high, bar.low, bar.close)
         if not all(_finite_real(value, positive=True) for value in prices):
@@ -128,6 +220,7 @@ def validate_bars(
         "OUT_OF_ORDER",
         "INVALID_PRICE",
         "INVALID_OHLC",
+        "INVALID_INSTRUMENT",
         "TIMEFRAME_MISMATCH",
         "INSTRUMENT_MISMATCH",
         "SOURCE_MISMATCH",
@@ -138,6 +231,30 @@ def validate_bars(
     }
     if reasons & errors:
         return DataQualityReport(DataStatus.ERROR, now, tuple(sorted(reasons)))
-    if reasons:
+    if reasons & {
+        "INCOMPLETE_BAR",
+        "GAP_SESSION_UNKNOWN",
+        "MISSING_BAR",
+        "CALENDAR_COVERAGE_UNKNOWN",
+    }:
         return DataQualityReport(DataStatus.INSUFFICIENT_DATA, now, tuple(sorted(reasons)))
-    return DataQualityReport(DataStatus.VALID, now, ())
+    return DataQualityReport(DataStatus.VALID, now, tuple(sorted(reasons)))
+
+
+def validate_bar_records(
+    bars: tuple[MarketBar, ...],
+    timeframe: str,
+    now: datetime,
+    *,
+    check_completion: bool = True,
+) -> DataQualityReport:
+    """Validate provider records without assigning calendar meaning to gaps."""
+    return _validate_bars(
+        bars,
+        timeframe,
+        now,
+        expected_open=None,
+        calendar=None,
+        classify_gaps=False,
+        check_completion=check_completion,
+    )

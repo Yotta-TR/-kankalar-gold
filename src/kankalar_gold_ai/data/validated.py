@@ -13,8 +13,9 @@ from kankalar_gold_ai.core.contracts import (
     as_utc,
 )
 from kankalar_gold_ai.data.bar_validation import bar_integrity_reasons
+from kankalar_gold_ai.data.calendar import SessionCalendar
 from kankalar_gold_ai.data.errors import HistoricalDataQualityError
-from kankalar_gold_ai.data.quality import TIMEFRAME_DURATIONS, validate_bars
+from kankalar_gold_ai.data.quality import bar_completion_utc, validate_bars
 
 ExpectedOpen = Callable[[datetime], bool]
 
@@ -49,6 +50,11 @@ class ValidatedBarSet:
     validated_at_utc: datetime
     cutoff_utc: datetime
     expected_open: ExpectedOpen | None
+    calendar_id: str | None
+    calendar_version: str | None
+    calendar_timezone: str | None
+    calendar_configuration_sha256: str | None
+    calendar_identity_json: str | None
 
     def __init__(
         self,
@@ -59,6 +65,7 @@ class ValidatedBarSet:
         cutoff_utc: datetime,
         expected_open: ExpectedOpen | None = None,
         expected_instrument: str | None = None,
+        calendar: SessionCalendar | None = None,
     ) -> None:
         if not isinstance(bars, tuple):
             raise TypeError("bars must be an ordered tuple")
@@ -70,7 +77,14 @@ class ValidatedBarSet:
         if any(not isinstance(bar, MarketBar) for bar in bars):
             raise TypeError("bars must contain only MarketBar instances")
 
-        report = validate_bars(bars, timeframe, now, expected_open=session_policy)
+        report = validate_bars(
+            bars,
+            timeframe,
+            now,
+            expected_open=session_policy,
+            calendar=calendar,
+            expected_instrument=expected_instrument,
+        )
         integrity_reasons = bar_integrity_reasons(bars, timeframe, expected_instrument)
         if integrity_reasons:
             report = DataQualityReport(
@@ -81,8 +95,7 @@ class ValidatedBarSet:
         if report.status is not DataStatus.VALID:
             raise HistoricalDataQualityError(report)
 
-        duration = TIMEFRAME_DURATIONS[timeframe]
-        if any(bar.timestamp_utc + duration > cutoff for bar in bars):
+        if any(bar_completion_utc(bar.timestamp_utc, timeframe, calendar) > cutoff for bar in bars):
             raise ValueError("input bars complete after cutoff_utc")
 
         first = bars[0]
@@ -94,6 +107,22 @@ class ValidatedBarSet:
         object.__setattr__(self, "validated_at_utc", now)
         object.__setattr__(self, "cutoff_utc", cutoff)
         object.__setattr__(self, "expected_open", session_policy)
+        object.__setattr__(self, "calendar_id", None if calendar is None else calendar.calendar_id)
+        object.__setattr__(self, "calendar_version", None if calendar is None else calendar.version)
+        identity = None if calendar is None else calendar.canonical_identity()
+        object.__setattr__(
+            self, "calendar_timezone", None if calendar is None else calendar.timezone_name
+        )
+        object.__setattr__(
+            self,
+            "calendar_configuration_sha256",
+            None if identity is None else identity["configuration_sha256"],
+        )
+        object.__setattr__(
+            self,
+            "calendar_identity_json",
+            None if calendar is None else calendar.canonical_identity_json(),
+        )
 
     @classmethod
     def from_bars(
@@ -105,6 +134,7 @@ class ValidatedBarSet:
         cutoff_utc: datetime,
         expected_open: ExpectedOpen | None = None,
         expected_instrument: str | None = None,
+        calendar: SessionCalendar | None = None,
     ) -> ValidatedBarSet:
         """Validate bars and raise with the full report unless quality is VALID."""
         return cls(
@@ -114,4 +144,5 @@ class ValidatedBarSet:
             cutoff_utc=cutoff_utc,
             expected_open=expected_open,
             expected_instrument=expected_instrument,
+            calendar=calendar,
         )

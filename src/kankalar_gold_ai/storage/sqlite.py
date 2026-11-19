@@ -1,5 +1,6 @@
 """Safe, versioned SQLite persistence for Phase 0 research records and Phase 1A data."""
 
+import hashlib
 import json
 import sqlite3
 from contextlib import closing, contextmanager
@@ -51,7 +52,7 @@ def _reject_constant(name: str) -> object:
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -115,6 +116,7 @@ class SQLitePersistence:
                     1: self._migrate_to_version_1,
                     2: self._migrate_to_version_2,
                     3: self._migrate_to_version_3,
+                    4: self._migrate_to_version_4,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -198,6 +200,90 @@ class SQLitePersistence:
         )
         for statement in statements:
             connection.execute(statement)
+
+    def _migrate_to_version_4(self, connection: sqlite3.Connection) -> None:
+        """Preserve distinct quote/tick events sharing an exchange timestamp."""
+        connection.execute("DROP INDEX IF EXISTS idx_market_ticks_instrument")
+        connection.execute(
+            """
+            CREATE TABLE market_ticks_v4 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument TEXT NOT NULL,
+                timestamp_utc TEXT NOT NULL,
+                timestamp_milliseconds INTEGER,
+                bid REAL,
+                ask REAL,
+                last REAL,
+                volume REAL,
+                flags INTEGER,
+                source TEXT NOT NULL,
+                retrieved_at_utc TEXT NOT NULL,
+                event_hash TEXT NOT NULL,
+                UNIQUE (instrument, source, event_hash)
+            )
+            """
+        )
+        tick_rows = connection.execute(
+            """
+            SELECT instrument, timestamp_utc, timestamp_milliseconds, bid, ask, last,
+                   volume, flags, source, retrieved_at_utc
+            FROM market_ticks ORDER BY rowid
+            """
+        )
+        for row in tick_rows:
+            event_hash = _event_identity_hash(row[:9], float_positions=(3, 4, 5, 6))
+            connection.execute(
+                """
+                INSERT INTO market_ticks_v4 (
+                    instrument, timestamp_utc, timestamp_milliseconds, bid, ask, last,
+                    volume, flags, source, retrieved_at_utc, event_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*row, event_hash),
+            )
+        connection.execute("DROP TABLE market_ticks")
+        connection.execute("ALTER TABLE market_ticks_v4 RENAME TO market_ticks")
+        connection.execute("CREATE INDEX idx_market_ticks_instrument ON market_ticks(instrument)")
+
+        connection.execute("DROP INDEX IF EXISTS idx_market_quotes_instrument")
+        connection.execute(
+            """
+            CREATE TABLE market_quotes_v4 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument TEXT NOT NULL,
+                timestamp_utc TEXT NOT NULL,
+                timestamp_milliseconds INTEGER,
+                bid REAL NOT NULL,
+                ask REAL NOT NULL,
+                last REAL,
+                source TEXT NOT NULL,
+                retrieved_at_utc TEXT NOT NULL,
+                event_hash TEXT NOT NULL,
+                UNIQUE (instrument, source, event_hash)
+            )
+            """
+        )
+        quote_rows = connection.execute(
+            """
+            SELECT instrument, timestamp_utc, timestamp_milliseconds, bid, ask, last,
+                   source, retrieved_at_utc
+            FROM market_quotes ORDER BY rowid
+            """
+        )
+        for row in quote_rows:
+            event_hash = _event_identity_hash(row[:7], float_positions=(3, 4, 5))
+            connection.execute(
+                """
+                INSERT INTO market_quotes_v4 (
+                    instrument, timestamp_utc, timestamp_milliseconds, bid, ask, last,
+                    source, retrieved_at_utc, event_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*row, event_hash),
+            )
+        connection.execute("DROP TABLE market_quotes")
+        connection.execute("ALTER TABLE market_quotes_v4 RENAME TO market_quotes")
+        connection.execute("CREATE INDEX idx_market_quotes_instrument ON market_quotes(instrument)")
 
     def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
         """Phase 1B.3 schema: structured provenance and an explicit cache-format column."""
@@ -365,7 +451,7 @@ class SQLitePersistence:
             )
 
     def save_market_ticks(self, ticks: tuple[MarketTick, ...]) -> None:
-        """Append market ticks; duplicates are rejected by primary key."""
+        """Append ticks; exact repeated events are rejected by their identity hash."""
         rows = [
             (
                 tick.instrument,
@@ -378,6 +464,20 @@ class SQLitePersistence:
                 tick.flags,
                 tick.source,
                 _utc_isoformat(tick.retrieved_at_utc),
+                _event_identity_hash(
+                    (
+                        tick.instrument,
+                        _utc_isoformat(tick.timestamp_utc),
+                        tick.timestamp_milliseconds,
+                        tick.bid,
+                        tick.ask,
+                        tick.last,
+                        tick.volume,
+                        tick.flags,
+                        tick.source,
+                    ),
+                    float_positions=(3, 4, 5, 6),
+                ),
             )
             for tick in ticks
         ]
@@ -386,21 +486,21 @@ class SQLitePersistence:
                 """
                 INSERT INTO market_ticks
                 (instrument, timestamp_utc, timestamp_milliseconds, bid, ask, last, volume,
-                 flags, source, retrieved_at_utc)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 flags, source, retrieved_at_utc, event_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
 
     def save_market_quote(self, quote: MarketQuote) -> None:
-        """Record a market quote snapshot; duplicates are rejected by primary key."""
+        """Append a quote snapshot; exact repeated events are rejected by identity hash."""
         with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO market_quotes
                 (instrument, timestamp_utc, timestamp_milliseconds, bid, ask, last, source,
-                 retrieved_at_utc)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 retrieved_at_utc, event_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     quote.instrument,
@@ -411,6 +511,18 @@ class SQLitePersistence:
                     quote.last,
                     quote.source,
                     _utc_isoformat(quote.retrieved_at_utc),
+                    _event_identity_hash(
+                        (
+                            quote.instrument,
+                            _utc_isoformat(quote.timestamp_utc),
+                            quote.timestamp_milliseconds,
+                            quote.bid,
+                            quote.ask,
+                            quote.last,
+                            quote.source,
+                        ),
+                        float_positions=(3, 4, 5),
+                    ),
                 ),
             )
 
@@ -554,6 +666,27 @@ def _utc_isoformat(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _event_identity_hash(values: tuple[object, ...], *, float_positions: tuple[int, ...]) -> str:
+    normalized_values: list[object] = []
+    for index, value in enumerate(values):
+        if index in float_positions and value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError("event price and volume identity fields must be numeric")
+            normalized_values.append(float(value).hex())
+        elif type(value) is float:
+            normalized_values.append(value.hex())
+        else:
+            normalized_values.append(value)
+    normalized = tuple(normalized_values)
+    serialized = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def as_utc(value: datetime) -> datetime:
