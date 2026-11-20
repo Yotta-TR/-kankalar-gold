@@ -2,6 +2,7 @@
 
 from kankalar_gold_ai.core.contracts import (
     Direction,
+    FailedBreakoutType,
     MarketBar,
     Persistence,
     RiskDecision,
@@ -11,6 +12,7 @@ from kankalar_gold_ai.core.contracts import (
     StrategyProposal,
     StructureBreakEvent,
     StructureBreakType,
+    StructureFailedBreakoutEvent,
     StructureSweepEvent,
     StructureSweepSide,
     StructureZone,
@@ -25,6 +27,7 @@ from kankalar_gold_ai.core.contracts import (
 
 __all__ = [
     "Direction",
+    "FailedBreakoutType",
     "MarketBar",
     "Persistence",
     "RiskDecision",
@@ -33,6 +36,7 @@ __all__ = [
     "SignalState",
     "StructureBreakEvent",
     "StructureBreakType",
+    "StructureFailedBreakoutEvent",
     "StructureSweepEvent",
     "StructureSweepSide",
     "StructureZone",

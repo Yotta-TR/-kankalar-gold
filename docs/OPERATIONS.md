@@ -27,7 +27,7 @@ errors are persisted as non-computing study results with status and stable
 source/reason evidence. Invalid requests and unclassified exceptions still
 raise. The helper is an offline integration seam; it does not initialize MT5.
 
-SQLite migrations through schema v10 are transactional. Schema v4 upgrades
+SQLite migrations through schema v11 are transactional. Schema v4 upgrades
 quote/tick event identity, schema v5 adds append-only study events and result
 observations, schema v6 indexes the calendar-context cache identity, and schema
 v7 blocks `INSERT OR REPLACE` on matching study-event identities or
@@ -64,6 +64,17 @@ immutable candle payload fails the write. D1 timing uses the supplied calendar.
 Sweep computation scans the supplied history and zone lookback; long histories
 and large lookbacks increase computation. No volume strength, prediction,
 intrabar ordering or trading recommendation is provided.
+
+Register `RangeFailedBreakoutStudy` with explicit positive integer `lookback_bars`
+and `reclaim_window_bars`, and finite non-negative `breakout_buffer_bps`.
+Use validated completed bars through the runner or pipeline. Each candidate
+freezes the immediately preceding range and expires silently after the reclaim
+window; an opposite-boundary close invalidates it. The resolution candle cannot
+start another candidate. Schema v11 stores immutable events and observations;
+the parent result preserves source and snapshot context. Retain the same
+history start and calendar context for replay. A wick reclaim sweep is distinct:
+this study requires a close-confirmed breakout and a later close reclaim.
+It is descriptive only, with no volume strength, score, or trading advice.
 
 Register `BosChochStudy` with `StudyRegistry` and use `StudyRunner` or
 `run_pipeline_study` with explicit positive `left_bars` and `right_bars`.

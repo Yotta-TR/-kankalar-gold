@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from kankalar_gold_ai.core.contracts import (
     Direction,
     StructureBreakEvent,
+    StructureFailedBreakoutEvent,
     StructureSweepEvent,
     StructureZone,
     StudyEvent,
@@ -275,7 +276,14 @@ def validate_study_result(result: StudyResult) -> None:
     _require(
         type(result.events) is tuple
         and all(
-            type(event) in (StudyEvent, StructureBreakEvent, StructureZone, StructureSweepEvent)
+            type(event)
+            in (
+                StudyEvent,
+                StructureBreakEvent,
+                StructureZone,
+                StructureSweepEvent,
+                StructureFailedBreakoutEvent,
+            )
             for event in result.events
         ),
         "events must be a tuple of study event values",
@@ -294,6 +302,14 @@ def validate_study_result(result: StudyResult) -> None:
         _require(result.status is StudyStatus.AVAILABLE, "events require an AVAILABLE result")
         context_id = provenance_mapping(result.provenance).get(PROV_CALENDAR_CONTEXT_ID)
         for event in result.events:
+            if isinstance(event, StructureFailedBreakoutEvent):
+                _require(
+                    event.calendar_context_id == context_id
+                    and result.inputs.get("lookback_bars") == event.lookback_bars
+                    and result.inputs.get("reclaim_window_bars") == event.reclaim_window_bars
+                    and result.inputs.get("breakout_buffer_bps") == event.breakout_buffer_bps,
+                    "failed-breakout context and configuration must match its parent result",
+                )
             if isinstance(event, (StructureBreakEvent, StructureZone)):
                 _require(
                     event.calendar_context_id == context_id,

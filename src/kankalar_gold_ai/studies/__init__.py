@@ -33,6 +33,7 @@ from kankalar_gold_ai.studies.multitimeframe import (
 )
 from kankalar_gold_ai.studies.multitimeframe_coordinator import MultiTimeframeAnalysisCoordinator
 from kankalar_gold_ai.studies.pipeline_execution import run_pipeline_study
+from kankalar_gold_ai.studies.range_failed_breakout import RangeFailedBreakoutStudy
 from kankalar_gold_ai.studies.registry import RegisteredStudy, StudyRegistry
 from kankalar_gold_ai.studies.runner import (
     DataFailure,
@@ -64,6 +65,7 @@ __all__ = [
     "PreflightComponent",
     "PreflightEligibility",
     "PreparedStudyRun",
+    "RangeFailedBreakoutStudy",
     "RegisteredStudy",
     "StudyConfigError",
     "StudyComputationContext",

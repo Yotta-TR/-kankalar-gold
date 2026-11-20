@@ -13,6 +13,7 @@ from kankalar_gold_ai.core.contracts import (
     Direction,
     MarketBar,
     StructureBreakEvent,
+    StructureFailedBreakoutEvent,
     StructureSweepEvent,
     StructureZone,
     StudyEvent,
@@ -165,9 +166,23 @@ def _string_tuple(name: str, values: object) -> tuple[str, ...]:
 
 def _event_tuple(
     values: object,
-) -> tuple[StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent, ...]:
+) -> tuple[
+    StudyEvent
+    | StructureBreakEvent
+    | StructureZone
+    | StructureSweepEvent
+    | StructureFailedBreakoutEvent,
+    ...,
+]:
     if type(values) is not tuple or any(
-        type(value) not in (StudyEvent, StructureBreakEvent, StructureZone, StructureSweepEvent)
+        type(value)
+        not in (
+            StudyEvent,
+            StructureBreakEvent,
+            StructureZone,
+            StructureSweepEvent,
+            StructureFailedBreakoutEvent,
+        )
         for value in values
     ):
         raise ValueError("events must be an immutable tuple of study event values")
@@ -183,7 +198,14 @@ class _StudyOutputFields(NamedTuple):
     uncertainty: float | None
     evidence: tuple[str, ...]
     limitations: tuple[str, ...]
-    events: tuple[StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent, ...]
+    events: tuple[
+        StudyEvent
+        | StructureBreakEvent
+        | StructureZone
+        | StructureSweepEvent
+        | StructureFailedBreakoutEvent,
+        ...,
+    ]
 
 
 @final
@@ -212,7 +234,12 @@ class StudyOutput(tuple[_StudyOutputFields]):
         evidence: tuple[str, ...] = (),
         limitations: tuple[str, ...] = (),
         events: tuple[
-            StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent, ...
+            StudyEvent
+            | StructureBreakEvent
+            | StructureZone
+            | StructureSweepEvent
+            | StructureFailedBreakoutEvent,
+            ...,
         ] = (),
     ) -> StudyOutput:
         if not isinstance(status, StudyStatus) or status not in STUDY_OUTPUT_STATUSES:
@@ -278,7 +305,14 @@ class StudyOutput(tuple[_StudyOutputFields]):
     @property
     def events(
         self,
-    ) -> tuple[StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent, ...]:
+    ) -> tuple[
+        StudyEvent
+        | StructureBreakEvent
+        | StructureZone
+        | StructureSweepEvent
+        | StructureFailedBreakoutEvent,
+        ...,
+    ]:
         return self[0].events
 
     def __eq__(self, other: object) -> bool:

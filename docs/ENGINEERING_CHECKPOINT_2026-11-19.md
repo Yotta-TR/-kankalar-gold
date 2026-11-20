@@ -1,5 +1,17 @@
 # Engineering checkpoint — 2026-11-19
 
+## Phase 2G
+
+- Added descriptive `structure.range_failed_breakout` v0.1.0: completed
+  close-confirmed candidates use a frozen preceding range and a bounded later
+  close reclaim. Wick reclaims remain a separate sweep definition.
+- Added immutable failed-breakout events, transactional schema v11, event
+  observations, cache restoration, and append-only replacement guards.
+- No volume strength, predictive score, or trading recommendation is provided.
+- Local Python 3.14.2: 1,010 tests passed; the safety subset passed 18 tests
+  (22 deselected). Ruff lint/format, mypy and diff checks passed. Python 3.11
+  and 3.12 require CI verification.
+
 ## Phase 2F
 
 - Added descriptive `structure.liquidity_sweep` v0.1.0 with explicit swing,
