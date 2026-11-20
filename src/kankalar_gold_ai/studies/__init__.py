@@ -43,6 +43,7 @@ from kankalar_gold_ai.studies.runner import (
     StudyRunRequest,
 )
 from kankalar_gold_ai.studies.sr_zones import SupportResistanceZonesStudy
+from kankalar_gold_ai.studies.structure_fvg import StructureFvgStudy
 from kankalar_gold_ai.studies.swings import ConfirmedSwingsStudy
 
 __all__ = [
@@ -77,6 +78,7 @@ __all__ = [
     "StudyResultStore",
     "StudyRunner",
     "StudyRunRequest",
+    "StructureFvgStudy",
     "SupportResistanceZonesStudy",
     "run_pipeline_study",
     "StudyOutput",

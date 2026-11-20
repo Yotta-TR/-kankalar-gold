@@ -650,6 +650,125 @@ class StructureSweepEvent:
             raise ValueError("event_id does not match the canonical sweep identity")
 
 
+def structure_fvg_event_id(
+    study_id: str,
+    version: str,
+    instrument: str,
+    timeframe: str,
+    direction: Direction,
+    lower_price: float,
+    upper_price: float,
+    first_candle_time_utc: datetime,
+    middle_candle_time_utc: datetime,
+    third_candle_time_utc: datetime,
+    known_at_utc: datetime,
+    source: str,
+    calendar_context_id: str,
+) -> str:
+    """Identify one immutable three-candle price-imbalance observation."""
+    if not _is_calendar_context_id(calendar_context_id):
+        raise ValueError("invalid calendar context identity")
+    fields = (
+        study_id,
+        version,
+        instrument,
+        timeframe,
+        direction.value,
+        float(lower_price).hex(),
+        float(upper_price).hex(),
+        as_utc(first_candle_time_utc).isoformat().replace("+00:00", "Z"),
+        as_utc(middle_candle_time_utc).isoformat().replace("+00:00", "Z"),
+        as_utc(third_candle_time_utc).isoformat().replace("+00:00", "Z"),
+        as_utc(known_at_utc).isoformat().replace("+00:00", "Z"),
+        source,
+        calendar_context_id,
+    )
+    canonical = json.dumps(fields, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return f"structure-fvg-v1:sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+@dataclass(frozen=True, slots=True)
+class StructureFvgEvent:
+    """Immutable descriptive three-candle price-imbalance event."""
+
+    event_id: str
+    study_id: str
+    version: str
+    instrument: str
+    timeframe: str
+    direction: Direction
+    lower_price: float
+    upper_price: float
+    first_candle_time_utc: datetime
+    middle_candle_time_utc: datetime
+    third_candle_time_utc: datetime
+    known_at_utc: datetime
+    source: str
+    calendar_context_id: str
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("event_id", self.event_id),
+            ("study_id", self.study_id),
+            ("version", self.version),
+            ("instrument", self.instrument),
+            ("timeframe", self.timeframe),
+            ("source", self.source),
+        ):
+            if type(value) is not str or not value:
+                raise ValueError(f"{name} must be a non-empty built-in string")
+        if type(self.direction) is not Direction or self.direction not in (
+            Direction.BULLISH,
+            Direction.BEARISH,
+        ):
+            raise ValueError("direction must be BULLISH or BEARISH")
+        if not _is_calendar_context_id(self.calendar_context_id):
+            raise ValueError("invalid calendar context identity")
+        if (
+            type(self.lower_price) not in (int, float)
+            or not math.isfinite(self.lower_price)
+            or self.lower_price <= 0
+        ):
+            raise ValueError("lower_price must be a finite positive built-in number")
+        if (
+            type(self.upper_price) not in (int, float)
+            or not math.isfinite(self.upper_price)
+            or self.upper_price <= 0
+        ):
+            raise ValueError("upper_price must be a finite positive built-in number")
+        object.__setattr__(self, "lower_price", float(self.lower_price))
+        object.__setattr__(self, "upper_price", float(self.upper_price))
+        if self.lower_price >= self.upper_price:
+            raise ValueError("FVG lower_price must be below upper_price")
+        object.__setattr__(self, "first_candle_time_utc", as_utc(self.first_candle_time_utc))
+        object.__setattr__(self, "middle_candle_time_utc", as_utc(self.middle_candle_time_utc))
+        object.__setattr__(self, "third_candle_time_utc", as_utc(self.third_candle_time_utc))
+        object.__setattr__(self, "known_at_utc", as_utc(self.known_at_utc))
+        if not (
+            self.first_candle_time_utc
+            < self.middle_candle_time_utc
+            < self.third_candle_time_utc
+            < self.known_at_utc
+        ):
+            raise ValueError("FVG candle and known-at timestamps must be strictly increasing")
+        if self.event_id != structure_fvg_event_id(
+            self.study_id,
+            self.version,
+            self.instrument,
+            self.timeframe,
+            self.direction,
+            self.lower_price,
+            self.upper_price,
+            self.first_candle_time_utc,
+            self.middle_candle_time_utc,
+            self.third_candle_time_utc,
+            self.known_at_utc,
+            self.source,
+            self.calendar_context_id,
+        ):
+            raise ValueError("event_id does not match the canonical FVG identity")
+
+
 class DataStatus(StrEnum):
     VALID = "VALID"
     STALE = "STALE"
@@ -764,7 +883,8 @@ class StudyResult:
         | StructureBreakEvent
         | StructureZone
         | StructureSweepEvent
-        | StructureFailedBreakoutEvent,
+        | StructureFailedBreakoutEvent
+        | StructureFvgEvent,
         ...,
     ] = ()
 

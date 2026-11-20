@@ -18,6 +18,7 @@ from kankalar_gold_ai.core.contracts import (
     Direction,
     StructureBreakEvent,
     StructureFailedBreakoutEvent,
+    StructureFvgEvent,
     StructureSweepEvent,
     StructureZone,
     StudyEvent,
@@ -283,6 +284,7 @@ def validate_study_result(result: StudyResult) -> None:
                 StructureZone,
                 StructureSweepEvent,
                 StructureFailedBreakoutEvent,
+                StructureFvgEvent,
             )
             for event in result.events
         ),
@@ -310,10 +312,15 @@ def validate_study_result(result: StudyResult) -> None:
                     and result.inputs.get("breakout_buffer_bps") == event.breakout_buffer_bps,
                     "failed-breakout context and configuration must match its parent result",
                 )
-            if isinstance(event, (StructureBreakEvent, StructureZone)):
+            if isinstance(event, (StructureBreakEvent, StructureZone, StructureFvgEvent)):
                 _require(
                     event.calendar_context_id == context_id,
                     "structure event calendar context must match its parent result",
+                )
+            if isinstance(event, StructureFvgEvent):
+                _require(
+                    event.source == provenance_mapping(result.provenance).get(PROV_SOURCE),
+                    "structure FVG source must match its parent result",
                 )
             if isinstance(event, StructureZone):
                 _require(

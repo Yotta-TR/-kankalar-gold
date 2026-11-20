@@ -14,11 +14,13 @@ from kankalar_gold_ai.core.contracts import (
     MarketBar,
     StructureBreakEvent,
     StructureFailedBreakoutEvent,
+    StructureFvgEvent,
     StructureSweepEvent,
     StructureZone,
     StudyEvent,
     StudyStatus,
 )
+from kankalar_gold_ai.data.calendar import SessionCalendar
 from kankalar_gold_ai.studies.errors import StudyConfigError
 
 ConfigValue: TypeAlias = str | int | float | bool | None
@@ -80,6 +82,7 @@ class StudyComputationContext:
     input_source: str
     input_window_start_utc: datetime
     input_window_end_utc: datetime
+    calendar: SessionCalendar | None = None
 
     def __post_init__(self) -> None:
         if type(self.timeframe) is not str or not self.timeframe:
@@ -119,6 +122,14 @@ class StudyComputationContext:
             raise ValueError("input window start must precede its end")
         if self.input_window_end_utc > self.as_of_utc:
             raise ValueError("input window must not extend past as_of_utc")
+        if self.calendar is not None and type(self.calendar) is not SessionCalendar:
+            raise ValueError("calendar must be a SessionCalendar or None")
+        if self.calendar is not None:
+            if (
+                self.calendar.canonical_identity_json() != self.calendar_context_json
+                or self.calendar.timezone_name != self.calendar_timezone
+            ):
+                raise ValueError("calendar does not match the computation context")
 
 
 def validate_config_values(values: Mapping[str, object]) -> dict[str, ConfigValue]:
@@ -171,7 +182,8 @@ def _event_tuple(
     | StructureBreakEvent
     | StructureZone
     | StructureSweepEvent
-    | StructureFailedBreakoutEvent,
+    | StructureFailedBreakoutEvent
+    | StructureFvgEvent,
     ...,
 ]:
     if type(values) is not tuple or any(
@@ -182,6 +194,7 @@ def _event_tuple(
             StructureZone,
             StructureSweepEvent,
             StructureFailedBreakoutEvent,
+            StructureFvgEvent,
         )
         for value in values
     ):
@@ -203,7 +216,8 @@ class _StudyOutputFields(NamedTuple):
         | StructureBreakEvent
         | StructureZone
         | StructureSweepEvent
-        | StructureFailedBreakoutEvent,
+        | StructureFailedBreakoutEvent
+        | StructureFvgEvent,
         ...,
     ]
 
@@ -238,7 +252,8 @@ class StudyOutput(tuple[_StudyOutputFields]):
             | StructureBreakEvent
             | StructureZone
             | StructureSweepEvent
-            | StructureFailedBreakoutEvent,
+            | StructureFailedBreakoutEvent
+            | StructureFvgEvent,
             ...,
         ] = (),
     ) -> StudyOutput:
@@ -310,7 +325,8 @@ class StudyOutput(tuple[_StudyOutputFields]):
         | StructureBreakEvent
         | StructureZone
         | StructureSweepEvent
-        | StructureFailedBreakoutEvent,
+        | StructureFailedBreakoutEvent
+        | StructureFvgEvent,
         ...,
     ]:
         return self[0].events

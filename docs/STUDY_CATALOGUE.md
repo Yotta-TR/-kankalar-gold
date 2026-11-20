@@ -75,7 +75,7 @@ Checked against the repository (not assumed):
 | Quotes and ticks | `validate_quote` reports non-finite/crossed/non-positive bid/ask, future or stale timestamps, inconsistent milliseconds, invalid last, and excessive spread. The MT5 adapter validates tick timestamp/range, finite and non-negative price values, bid/ask ordering, flags, changed-field consistency, exact duplicate records, and out-of-order events; distinct updates sharing a timestamp are preserved. Empty tick history has a typed missing-data error. Quotes and ticks still do not pass through a shared `ValidatedQuote`/`ValidatedTick` study pipeline; quote freshness/spread thresholds must be explicitly checked by the caller **[TBD]**. |
 | Instrument | The logical project identity is `GOLD_USD` [SPEC §19]; the broker symbol is `null` until discovered and confirmed from MT5 [SPEC §19]. It is commonly labelled XAUUSD, but the exact symbol is unresolved. |
 | Gap semantics (`data/calendar.py`, `data/quality.py`) | Gaps are classified with an explicit broker/instrument calendar. Known closures are retained as valid-quality diagnostics, open-session missing bars and unknown calendar coverage fail closed. The typed calendar contract has no broker schedule or timezone defaults; all calendar tests use synthetic schedules. |
-| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON. Schema v3 adds provenance; v4 rebuilds quote/tick identities; v5 adds immutable swing events and observations; v6 adds calendar-context cache identity; v7 blocks identity-based replacement; v8 adds structure-break events and observations and rowid replacement guards; v9 adds immutable zones and observations; v10 adds immutable sweeps and observations; v11 adds failed-breakout events and observations. `find_cached_study_result` validates the newest eligible row using the full cache key. Migrations and each write batch are transactional. Current schema version 11. |
+| Persistence (`storage/sqlite.py`) | `save_study_result` appends one row to `study_results` with `inputs`, `evidence` and `limitations` serialized as JSON. Schema v3 adds provenance; v4 rebuilds quote/tick identities; v5 adds immutable swing events and observations; v6 adds calendar-context cache identity; v7 blocks identity-based replacement; v8 adds structure-break events and observations and rowid replacement guards; v9 adds immutable zones and observations; v10 adds immutable sweeps and observations; v11 adds failed-breakout events and observations; v12 adds immutable FVG events and observations. `find_cached_study_result` validates the newest eligible row using the full cache key. Migrations and each write batch are transactional. Current schema version 12. |
 | Timeframe field | `StudyResult.timeframe` is a required `str`; it has no defined representation for non-bar (macro/event/weekly) studies (see §13). |
 | Study execution | `studies/runner.py` executes one timeframe per request and returns one `StudyResult`; a registration may support multiple independent timeframe runs. `compute_bar_snapshot_id` generates each run's timeframe-specific snapshot. |
 | Pipeline failure integration | `studies.pipeline_execution.run_pipeline_study` runs only validated bars; known quality, empty-history, and typed provider failures become persisted non-computing `StudyResult`s with status/reason/source evidence. Other request/programming errors still propagate. |
@@ -483,8 +483,8 @@ predictive contribution. `trend.atr_trend` additionally depends on the ATR study
 Common to the group: priority **STRUCTURE**; input: closed OHLC bars (verified broker gold instrument; exact symbol to be
 discovered via MT5); the spec requires every concept to have *an operational definition, a
 detection algorithm, and out-of-sample results* [SPEC §5.2]. `structure.swings`,
-`structure.bos_choch`, `structure.sr_zones`, `structure.liquidity_sweep` and
-`structure.range_failed_breakout` are
+`structure.bos_choch`, `structure.sr_zones`, `structure.liquidity_sweep`,
+`structure.range_failed_breakout` and `structure.gaps_fvg` are
 defined below; other unimplemented rules remain **[TBD]**.
 Type: *descriptive/contextual*. Principal risks: repainting (swings are only known after
 confirmation), subjective definitions, session-boundary ambiguity, and
@@ -497,7 +497,7 @@ session/calendar dependence (C1, only for session-dependent studies).
 | `structure.sr_zones` | Support/resistance zones | "based on repeatable swing/volume criteria" | Implemented as v0.1.0 below; volume-based strength is unavailable and unimplemented |
 | `structure.range_failed_breakout` | Range boundaries and failed breakouts | Named only | Implemented as v0.1.0 below |
 | `structure.session_levels` | Opening range and session highs/lows | Named only | Session definitions, time zones, DST **[TBD]**; needs C1 |
-| `structure.gaps_fvg` | Gap and imbalance descriptors, including Fair Value Gap candidates | "with precise candle definitions" | Candle definition **[TBD]**; gaps must not be confused with weekend/closure data absence |
+| `structure.gaps_fvg` | Gap and imbalance descriptors, including Fair Value Gap candidates | "with precise candle definitions" | Implemented as v0.1.0 below; lifecycle, merging, ranking and out-of-sample predictive validation remain **[TBD]** |
 | `structure.liquidity_sweep` | Liquidity sweep hypotheses around prior highs/lows and equal highs/lows | Described as "hypotheses" | v0.1.0 uses confirmed swing zones and completed wick reclaims; alternate sweep definitions remain **[TBD]** |
 | `structure.candlestick_patterns` | Candlestick patterns | "only where each pattern is formally defined and independently tested" | One sub-study per pattern; none selected **[TBD]** |
 
@@ -555,6 +555,29 @@ later); BOS/CHoCH and zones depend on swings; D1/D2 as in §5.1 tier C.
   Alternate equal-level and sweep rules, lifecycle, ranking, and out-of-sample
   validation remain **[TBD]**.
 
+### `structure.gaps_fvg` v0.1.0
+
+- Uses exactly three consecutive valid completed bars. A bullish price
+  imbalance requires `third.low > first.high`, with bounds
+  `[first.high, third.low]`; a bearish one requires `third.high < first.low`,
+  with bounds `[third.high, first.low]`. Equality is not a gap. Every
+  qualifying rolling window emits its own event, including overlapping or
+  adjacent windows; zones are never merged.
+- The known time is completion of the third candle. Each immutable event
+  records direction, bounds, the three candle timestamps, timeframe, source
+  and calendar context. Snapshot identity is retained on the parent `StudyResult`, linked by the
+  event observation, so appending bars cannot change an earlier event identity.
+- Both bar-to-bar intervals must be consecutive expected tradable bars. An
+  explicit validated session calendar may establish that a span contains only
+  known market closures; without one, exact timeframe adjacency is required.
+  A missing expected bar or unknown calendar interval produces no event.
+  Calendar-aware D1 completion respects local-day boundaries and DST.
+- No body-size/displacement threshold, volume filter, score, ranking, merging,
+  fill/mitigation lifecycle or prediction is implemented. An FVG is a
+  descriptive price imbalance, not an order-book void or evidence of
+  institutional activity. Mitigation/fill, merging, ranking and out-of-sample
+  predictive validation remain **[TBD]**.
+
 ### `structure.sr_zones` v0.1.0
 
 - Requires explicit positive integer `left_bars`, `right_bars` and
@@ -579,8 +602,8 @@ later); BOS/CHoCH and zones depend on swings; D1/D2 as in §5.1 tier C.
 - **Remaining structural TBDs:** alternate swing tie/prominence and
   parameter-selection rules; alternate break/consumption and bias initialization
   rules; zone merging, lifecycle, touches, invalidation, widths, strength,
-  volume semantics and ranking; range/failed-breakout definitions; session
-  ranges and calendars; FVG/gap candles; equal-level/sweep criteria; and
+  volume semantics and ranking; alternate range/failed-breakout definitions;
+  session ranges and calendars; equal-level/sweep criteria; and
   independently specified candlestick patterns. Out-of-sample validation is
   also TBD for all structural studies.
 
