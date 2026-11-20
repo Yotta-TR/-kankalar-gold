@@ -55,6 +55,11 @@ class StructureSweepSide(StrEnum):
     LOW_SIDE = "LOW_SIDE"
 
 
+class FailedBreakoutType(StrEnum):
+    UPSIDE = "UPSIDE"
+    DOWNSIDE = "DOWNSIDE"
+
+
 class StudyEventConflictError(RuntimeError):
     """A stable study-event identity was presented with a different payload."""
 
@@ -417,6 +422,133 @@ class StructureZone:
             raise ValueError("event_id does not match the canonical structure-zone identity")
 
 
+def failed_breakout_event_id(
+    study_id: str,
+    version: str,
+    instrument: str,
+    timeframe: str,
+    event_type: FailedBreakoutType,
+    breakout_time_utc: datetime,
+    reclaim_time_utc: datetime,
+    lookback_bars: int,
+    reclaim_window_bars: int,
+    breakout_buffer_bps: float,
+    calendar_context_id: str,
+) -> str:
+    """Identify a failed breakout independently of later snapshot extensions."""
+    fields = (
+        study_id,
+        version,
+        instrument,
+        timeframe,
+        event_type.value,
+        as_utc(breakout_time_utc).isoformat(),
+        as_utc(reclaim_time_utc).isoformat(),
+        lookback_bars,
+        reclaim_window_bars,
+        float(breakout_buffer_bps),
+        calendar_context_id,
+    )
+    canonical = json.dumps(fields, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return f"failed-breakout-v1:sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+@dataclass(frozen=True, slots=True)
+class StructureFailedBreakoutEvent:
+    """A completed close breakout followed by a close inside its frozen range."""
+
+    event_id: str
+    study_id: str
+    version: str
+    instrument: str
+    timeframe: str
+    event_type: FailedBreakoutType
+    range_start_utc: datetime
+    range_end_utc: datetime
+    range_high: float
+    range_low: float
+    breakout_time_utc: datetime
+    breakout_close: float
+    reclaim_time_utc: datetime
+    reclaim_close: float
+    known_at_utc: datetime
+    lookback_bars: int
+    reclaim_window_bars: int
+    breakout_buffer_bps: float
+    calendar_context_id: str
+
+    def __post_init__(self) -> None:
+        for value in (self.event_id, self.study_id, self.version, self.instrument, self.timeframe):
+            if type(value) is not str or not value:
+                raise ValueError("failed-breakout identity fields must be non-empty strings")
+        if type(self.event_type) is not FailedBreakoutType:
+            raise ValueError("event_type must be a FailedBreakoutType")
+        if not _is_calendar_context_id(self.calendar_context_id):
+            raise ValueError("invalid calendar context identity")
+        for name, timestamp in (
+            ("range_start_utc", self.range_start_utc),
+            ("range_end_utc", self.range_end_utc),
+            ("breakout_time_utc", self.breakout_time_utc),
+            ("reclaim_time_utc", self.reclaim_time_utc),
+            ("known_at_utc", self.known_at_utc),
+        ):
+            if type(timestamp) is not datetime:
+                raise ValueError(f"{name} must be a datetime")
+            object.__setattr__(self, name, as_utc(timestamp))
+        if not (
+            self.range_start_utc
+            <= self.range_end_utc
+            < self.breakout_time_utc
+            < self.reclaim_time_utc
+            < self.known_at_utc
+        ):
+            raise ValueError("invalid failed-breakout chronology")
+        for count in (self.lookback_bars, self.reclaim_window_bars):
+            if type(count) is not int or count < 1:
+                raise ValueError("window lengths must be positive built-in integers")
+        for name, price in (
+            ("range_high", self.range_high),
+            ("range_low", self.range_low),
+            ("breakout_close", self.breakout_close),
+            ("reclaim_close", self.reclaim_close),
+        ):
+            if type(price) not in (int, float) or not math.isfinite(price) or price <= 0:
+                raise ValueError(f"{name} must be a finite positive number")
+            object.__setattr__(self, name, float(price))
+        buffer = self.breakout_buffer_bps
+        if type(buffer) not in (int, float) or not math.isfinite(buffer) or buffer < 0:
+            raise ValueError("breakout_buffer_bps must be finite and non-negative")
+        object.__setattr__(self, "breakout_buffer_bps", float(buffer))
+        if self.range_low >= self.range_high or not (
+            self.range_low <= self.reclaim_close <= self.range_high
+        ):
+            raise ValueError("invalid range or reclaim close")
+        boundary = (
+            self.range_high if self.event_type is FailedBreakoutType.UPSIDE else self.range_low
+        )
+        distance = (
+            Fraction(str(self.breakout_close)) - Fraction(str(boundary))
+            if self.event_type is FailedBreakoutType.UPSIDE
+            else Fraction(str(boundary)) - Fraction(str(self.breakout_close))
+        )
+        if distance * 10000 <= Fraction(str(boundary)) * Fraction(str(buffer)):
+            raise ValueError("breakout close must exceed its buffered boundary")
+        if self.event_id != failed_breakout_event_id(
+            self.study_id,
+            self.version,
+            self.instrument,
+            self.timeframe,
+            self.event_type,
+            self.breakout_time_utc,
+            self.reclaim_time_utc,
+            self.lookback_bars,
+            self.reclaim_window_bars,
+            self.breakout_buffer_bps,
+            self.calendar_context_id,
+        ):
+            raise ValueError("event_id does not match the failed-breakout identity")
+
+
 def structure_sweep_event_id(
     study_id: str,
     version: str,
@@ -627,7 +759,14 @@ class StudyResult:
     limitations: tuple[str, ...]
     data_snapshot_id: str | None
     provenance: tuple[tuple[str, str], ...] = ()
-    events: tuple[StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent, ...] = ()
+    events: tuple[
+        StudyEvent
+        | StructureBreakEvent
+        | StructureZone
+        | StructureSweepEvent
+        | StructureFailedBreakoutEvent,
+        ...,
+    ] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "as_of_utc", as_utc(self.as_of_utc))

@@ -1,5 +1,24 @@
 # Architecture Decisions
 
+## ADR-024: Close-confirmed failed range breakouts (Phase 2G)
+
+- **Decision:** `structure.range_failed_breakout` v0.1.0 requires explicit
+  positive integer lookback and reclaim windows and a finite non-negative
+  basis-point buffer. The preceding completed bars define the fixed high and
+  low; zero-width ranges are skipped. A completed close strictly beyond the
+  buffered boundary starts one candidate, with the previous close in range.
+- **Resolution:** Only the next reclaim-window candles are inspected. A close
+  inside the original range emits an upside or downside event at completion;
+  a close beyond the opposite boundary invalidates it. Expiry is silent. The
+  resolution candle cannot initiate another candidate. Price comparisons use
+  decimal representations. D1 completion follows the validated calendar.
+- **Persistence:** Schema v11 atomically appends separate immutable events and
+  observations with rowid-aware replacement guards. IDs include market, study,
+  configuration, calendar, and event times; snapshot and source context remain
+  on the parent result. Conflicting payloads fail rather than overwrite history.
+- **Scope:** A wick reclaim sweep is not a close-confirmed failed breakout.
+  These events are descriptive only, without volume strength, scores or advice.
+
 ## ADR-023: Point-in-time liquidity sweep descriptions (Phase 2F)
 
 - **Decision:** `structure.liquidity_sweep` v0.1.0 requires explicit positive

@@ -4,12 +4,14 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing, contextmanager
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
 from kankalar_gold_ai.core.contracts import (
     Direction,
+    FailedBreakoutType,
     InstrumentSpecification,
     MarketBar,
     MarketDataHealth,
@@ -18,6 +20,7 @@ from kankalar_gold_ai.core.contracts import (
     SignalLifecycleEvent,
     StructureBreakEvent,
     StructureBreakType,
+    StructureFailedBreakoutEvent,
     StructureSweepEvent,
     StructureSweepSide,
     StructureZone,
@@ -88,7 +91,7 @@ def _reject_constant(name: str) -> object:
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 11
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -159,6 +162,7 @@ class SQLitePersistence:
                     8: self._migrate_to_version_8,
                     9: self._migrate_to_version_9,
                     10: self._migrate_to_version_10,
+                    11: self._migrate_to_version_11,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -559,6 +563,39 @@ class SQLitePersistence:
                 BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
             )
 
+    def _migrate_to_version_11(self, connection: sqlite3.Connection) -> None:
+        """Store immutable failed breakout records and observations."""
+        connection.execute(
+            """CREATE TABLE structure_failed_breakout_events (
+                event_id TEXT NOT NULL PRIMARY KEY, payload_json TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE structure_failed_breakout_observations (
+                result_id INTEGER NOT NULL REFERENCES study_results(id),
+                event_id TEXT NOT NULL REFERENCES structure_failed_breakout_events(event_id),
+                PRIMARY KEY (result_id, event_id)
+            )"""
+        )
+        for table, condition in (
+            ("structure_failed_breakout_events", "event_id = NEW.event_id"),
+            (
+                "structure_failed_breakout_observations",
+                "result_id = NEW.result_id AND event_id = NEW.event_id",
+            ),
+        ):
+            for operation in ("UPDATE", "DELETE"):
+                connection.execute(
+                    f"""CREATE TRIGGER {table}_no_{operation.lower()}
+                    BEFORE {operation} ON {table}
+                    BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+                )
+            connection.execute(
+                f"""CREATE TRIGGER {table}_no_replace BEFORE INSERT ON {table}
+                WHEN EXISTS (SELECT 1 FROM {table} WHERE ({condition}) OR rowid = NEW.rowid)
+                BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+            )
+
     def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
         """Phase 1B.3 schema: structured provenance and an explicit cache-format column."""
         statements = (
@@ -848,7 +885,15 @@ class SQLitePersistence:
     def save_study_result(self, result: StudyResult) -> None:
         """Atomically append a study result and all immutable event observations."""
         if any(
-            isinstance(event, (StructureBreakEvent, StructureZone, StructureSweepEvent))
+            isinstance(
+                event,
+                (
+                    StructureBreakEvent,
+                    StructureZone,
+                    StructureSweepEvent,
+                    StructureFailedBreakoutEvent,
+                ),
+            )
             for event in result.events
         ):
             validate_study_result(result)
@@ -887,6 +932,29 @@ class SQLitePersistence:
             if result_id is None:
                 raise RuntimeError("SQLite did not return the persisted study-result ID")
             for event in result.events:
+                if isinstance(event, StructureFailedBreakoutEvent):
+                    payload = _failed_breakout_json(event)
+                    row = connection.execute(
+                        "SELECT payload_json FROM structure_failed_breakout_events "
+                        "WHERE event_id = ?",
+                        (event.event_id,),
+                    ).fetchone()
+                    if row is None:
+                        connection.execute(
+                            "INSERT INTO structure_failed_breakout_events "
+                            "(event_id, payload_json) VALUES (?, ?)",
+                            (event.event_id, payload),
+                        )
+                    elif _failed_breakout_from_row((event.event_id, row[0])) != event:
+                        raise StudyEventConflictError(
+                            f"stored event {event.event_id} has a conflicting immutable payload"
+                        )
+                    connection.execute(
+                        "INSERT INTO structure_failed_breakout_observations (result_id, event_id) "
+                        "VALUES (?, ?)",
+                        (result_id, event.event_id),
+                    )
+                    continue
                 if isinstance(event, StructureSweepEvent):
                     _persist_zone(connection, event.reference_zone)
                     row = connection.execute(
@@ -1044,11 +1112,28 @@ class SQLitePersistence:
                 if zone_row is None:
                     raise StoredStudyResultError("stored sweep references a missing zone")
                 sweeps.append(_sweep_from_row(sweep_row, _zone_from_row(zone_row)))
-        all_events: list[StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent] = [
+            failed_rows = (
+                connection.execute(
+                    """SELECT e.event_id, e.payload_json FROM structure_failed_breakout_events e
+                    JOIN structure_failed_breakout_observations o ON o.event_id = e.event_id
+                    WHERE o.result_id = ?""",
+                    (row[0],),
+                ).fetchall()
+                if self._get_version(connection) >= 11
+                else []
+            )
+        all_events: list[
+            StudyEvent
+            | StructureBreakEvent
+            | StructureZone
+            | StructureSweepEvent
+            | StructureFailedBreakoutEvent
+        ] = [
             *(_study_event_from_row(item) for item in event_rows),
             *(_break_event_from_row(item) for item in break_rows),
             *(_zone_from_row(item) for item in zone_rows),
             *sweeps,
+            *(_failed_breakout_from_row(item) for item in failed_rows),
         ]
         events = tuple(sorted(all_events, key=_study_event_order))
         return _study_result_from_row(row, events)
@@ -1163,8 +1248,14 @@ def _study_event_values(event: StudyEvent) -> tuple[object, ...]:
 
 
 def _study_event_order(
-    event: StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent,
+    event: StudyEvent
+    | StructureBreakEvent
+    | StructureZone
+    | StructureSweepEvent
+    | StructureFailedBreakoutEvent,
 ) -> tuple[datetime, datetime, str, str]:
+    if isinstance(event, StructureFailedBreakoutEvent):
+        return (event.known_at_utc, event.reclaim_time_utc, event.event_type.value, event.event_id)
     if isinstance(event, StructureSweepEvent):
         return (event.known_at_utc, event.sweep_bar_time_utc, event.side.value, event.event_id)
     if isinstance(event, StructureZone):
@@ -1182,6 +1273,41 @@ def _study_event_order(
         event.event_type.value,
         event.event_id,
     )
+
+
+def _failed_breakout_json(event: StructureFailedBreakoutEvent) -> str:
+    payload = asdict(event)
+    for key in (
+        "range_start_utc",
+        "range_end_utc",
+        "breakout_time_utc",
+        "reclaim_time_utc",
+        "known_at_utc",
+    ):
+        payload[key] = _utc_isoformat(payload[key])
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _failed_breakout_from_row(row: tuple[object, ...]) -> StructureFailedBreakoutEvent:
+    try:
+        event_id, payload_json = row
+        if type(event_id) is not str or type(payload_json) is not str:
+            raise ValueError("invalid failed-breakout row")
+        payload = json.loads(payload_json, parse_constant=_reject_constant)
+        if type(payload) is not dict or payload.get("event_id") != event_id:
+            raise ValueError("invalid failed-breakout payload")
+        for key in (
+            "range_start_utc",
+            "range_end_utc",
+            "breakout_time_utc",
+            "reclaim_time_utc",
+            "known_at_utc",
+        ):
+            payload[key] = parse_utc_z(payload[key])
+        payload["event_type"] = FailedBreakoutType(payload["event_type"])
+        return StructureFailedBreakoutEvent(**payload)
+    except (ValueError, TypeError, KeyError) as error:
+        raise StoredStudyResultError("stored failed-breakout row is corrupt") from error
 
 
 def _zone_values(zone: StructureZone) -> tuple[object, ...]:
@@ -1520,7 +1646,14 @@ def as_utc(value: datetime) -> datetime:
 
 def _study_result_from_row(
     row: tuple[object, ...],
-    events: tuple[StudyEvent | StructureBreakEvent | StructureZone | StructureSweepEvent, ...] = (),
+    events: tuple[
+        StudyEvent
+        | StructureBreakEvent
+        | StructureZone
+        | StructureSweepEvent
+        | StructureFailedBreakoutEvent,
+        ...,
+    ] = (),
 ) -> StudyResult:
     """Strictly rebuild a StudyResult; any violation raises StoredStudyResultError."""
     try:
