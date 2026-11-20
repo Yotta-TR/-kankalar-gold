@@ -21,6 +21,7 @@ from kankalar_gold_ai.core.contracts import (
     StructureBreakEvent,
     StructureBreakType,
     StructureFailedBreakoutEvent,
+    StructureFvgEvent,
     StructureSweepEvent,
     StructureSweepSide,
     StructureZone,
@@ -82,6 +83,7 @@ _SWEEP_COLUMNS = (
     "sweep_bar_time_utc, known_at_utc, previous_close, wick_price, close, min_sweep_bps"
 )
 _SWEEP_SELECT_COLUMNS = ", ".join(f"e.{column}" for column in _SWEEP_COLUMNS.split(", "))
+_FVG_SELECT_COLUMNS = "e.event_id, e.payload_json"
 
 
 def _reject_constant(name: str) -> object:
@@ -91,7 +93,7 @@ def _reject_constant(name: str) -> object:
 class SQLitePersistence:
     """Append-oriented SQLite persistence; never opens a broker or network connection."""
 
-    SCHEMA_VERSION = 11
+    SCHEMA_VERSION = 12
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
@@ -163,6 +165,7 @@ class SQLitePersistence:
                     9: self._migrate_to_version_9,
                     10: self._migrate_to_version_10,
                     11: self._migrate_to_version_11,
+                    12: self._migrate_to_version_12,
                 }
                 while current < self.SCHEMA_VERSION:
                     target = current + 1
@@ -596,6 +599,39 @@ class SQLitePersistence:
                 BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
             )
 
+    def _migrate_to_version_12(self, connection: sqlite3.Connection) -> None:
+        """Store immutable structure FVG events and result observations."""
+        connection.execute(
+            """CREATE TABLE structure_fvg_events (
+                event_id TEXT NOT NULL PRIMARY KEY, payload_json TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE structure_fvg_observations (
+                result_id INTEGER NOT NULL REFERENCES study_results(id),
+                event_id TEXT NOT NULL REFERENCES structure_fvg_events(event_id),
+                PRIMARY KEY (result_id, event_id)
+            )"""
+        )
+        for table, condition in (
+            ("structure_fvg_events", "event_id = NEW.event_id"),
+            (
+                "structure_fvg_observations",
+                "result_id = NEW.result_id AND event_id = NEW.event_id",
+            ),
+        ):
+            for operation in ("UPDATE", "DELETE"):
+                connection.execute(
+                    f"""CREATE TRIGGER {table}_no_{operation.lower()}
+                    BEFORE {operation} ON {table}
+                    BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+                )
+            connection.execute(
+                f"""CREATE TRIGGER {table}_no_replace BEFORE INSERT ON {table}
+                WHEN EXISTS (SELECT 1 FROM {table} WHERE ({condition}) OR rowid = NEW.rowid)
+                BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+            )
+
     def _migrate_to_version_3(self, connection: sqlite3.Connection) -> None:
         """Phase 1B.3 schema: structured provenance and an explicit cache-format column."""
         statements = (
@@ -892,6 +928,7 @@ class SQLitePersistence:
                     StructureZone,
                     StructureSweepEvent,
                     StructureFailedBreakoutEvent,
+                    StructureFvgEvent,
                 ),
             )
             for event in result.events
@@ -932,6 +969,28 @@ class SQLitePersistence:
             if result_id is None:
                 raise RuntimeError("SQLite did not return the persisted study-result ID")
             for event in result.events:
+                if isinstance(event, StructureFvgEvent):
+                    payload = _fvg_event_json(event)
+                    row = connection.execute(
+                        "SELECT payload_json FROM structure_fvg_events WHERE event_id = ?",
+                        (event.event_id,),
+                    ).fetchone()
+                    if row is None:
+                        connection.execute(
+                            "INSERT INTO structure_fvg_events (event_id, payload_json) "
+                            "VALUES (?, ?)",
+                            (event.event_id, payload),
+                        )
+                    elif _fvg_event_from_row((event.event_id, row[0])) != event:
+                        raise StudyEventConflictError(
+                            f"stored event {event.event_id} has a conflicting immutable payload"
+                        )
+                    connection.execute(
+                        "INSERT INTO structure_fvg_observations (result_id, event_id) "
+                        "VALUES (?, ?)",
+                        (result_id, event.event_id),
+                    )
+                    continue
                 if isinstance(event, StructureFailedBreakoutEvent):
                     payload = _failed_breakout_json(event)
                     row = connection.execute(
@@ -1122,18 +1181,30 @@ class SQLitePersistence:
                 if self._get_version(connection) >= 11
                 else []
             )
+            fvg_rows = (
+                connection.execute(
+                    f"""SELECT {_FVG_SELECT_COLUMNS} FROM structure_fvg_events e
+                    JOIN structure_fvg_observations o ON o.event_id = e.event_id
+                    WHERE o.result_id = ?""",
+                    (row[0],),
+                ).fetchall()
+                if self._get_version(connection) >= 12
+                else []
+            )
         all_events: list[
             StudyEvent
             | StructureBreakEvent
             | StructureZone
             | StructureSweepEvent
             | StructureFailedBreakoutEvent
+            | StructureFvgEvent
         ] = [
             *(_study_event_from_row(item) for item in event_rows),
             *(_break_event_from_row(item) for item in break_rows),
             *(_zone_from_row(item) for item in zone_rows),
             *sweeps,
             *(_failed_breakout_from_row(item) for item in failed_rows),
+            *(_fvg_event_from_row(item) for item in fvg_rows),
         ]
         events = tuple(sorted(all_events, key=_study_event_order))
         return _study_result_from_row(row, events)
@@ -1198,6 +1269,35 @@ class SQLitePersistence:
             )
         )
 
+    def list_structure_fvg_events(
+        self,
+        study_id: str,
+        version: str,
+        instrument: str,
+        timeframe: str,
+        *,
+        known_at_or_before_utc: datetime | None = None,
+    ) -> tuple[StructureFvgEvent, ...]:
+        """Return persisted structure FVG events in deterministic cutoff-bound order."""
+        cutoff = None if known_at_or_before_utc is None else as_utc(known_at_or_before_utc)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""SELECT DISTINCT {_FVG_SELECT_COLUMNS}
+                FROM structure_fvg_events e
+                JOIN structure_fvg_observations o ON o.event_id = e.event_id
+                JOIN study_results r ON r.id = o.result_id
+                WHERE r.study_id = ? AND r.version = ? AND r.instrument = ?
+                  AND r.timeframe = ?""",
+                (study_id, version, instrument, timeframe),
+            ).fetchall()
+        events = (_fvg_event_from_row(row) for row in rows)
+        return tuple(
+            sorted(
+                (event for event in events if cutoff is None or event.known_at_utc <= cutoff),
+                key=_study_event_order,
+            )
+        )
+
     def save_signal_event(self, event: SignalLifecycleEvent) -> None:
         """Append one lifecycle event; duplicate event ids are rejected."""
         with self._connection() as connection:
@@ -1252,8 +1352,16 @@ def _study_event_order(
     | StructureBreakEvent
     | StructureZone
     | StructureSweepEvent
-    | StructureFailedBreakoutEvent,
+    | StructureFailedBreakoutEvent
+    | StructureFvgEvent,
 ) -> tuple[datetime, datetime, str, str]:
+    if isinstance(event, StructureFvgEvent):
+        return (
+            event.known_at_utc,
+            event.third_candle_time_utc,
+            event.direction.value,
+            event.event_id,
+        )
     if isinstance(event, StructureFailedBreakoutEvent):
         return (event.known_at_utc, event.reclaim_time_utc, event.event_type.value, event.event_id)
     if isinstance(event, StructureSweepEvent):
@@ -1308,6 +1416,40 @@ def _failed_breakout_from_row(row: tuple[object, ...]) -> StructureFailedBreakou
         return StructureFailedBreakoutEvent(**payload)
     except (ValueError, TypeError, KeyError) as error:
         raise StoredStudyResultError("stored failed-breakout row is corrupt") from error
+
+
+def _fvg_event_json(event: StructureFvgEvent) -> str:
+    payload = asdict(event)
+    for key in (
+        "first_candle_time_utc",
+        "middle_candle_time_utc",
+        "third_candle_time_utc",
+        "known_at_utc",
+    ):
+        payload[key] = _utc_isoformat(payload[key])
+    payload["direction"] = event.direction.value
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _fvg_event_from_row(row: tuple[object, ...]) -> StructureFvgEvent:
+    try:
+        event_id, payload_json = row
+        if type(event_id) is not str or type(payload_json) is not str:
+            raise ValueError("invalid structure FVG row")
+        payload = json.loads(payload_json, parse_constant=_reject_constant)
+        if type(payload) is not dict or payload.get("event_id") != event_id:
+            raise ValueError("invalid structure FVG payload")
+        for key in (
+            "first_candle_time_utc",
+            "middle_candle_time_utc",
+            "third_candle_time_utc",
+            "known_at_utc",
+        ):
+            payload[key] = parse_utc_z(payload[key])
+        payload["direction"] = Direction(payload["direction"])
+        return StructureFvgEvent(**payload)
+    except (ValueError, TypeError, KeyError) as error:
+        raise StoredStudyResultError("stored structure FVG row is corrupt") from error
 
 
 def _zone_values(zone: StructureZone) -> tuple[object, ...]:
@@ -1651,7 +1793,8 @@ def _study_result_from_row(
         | StructureBreakEvent
         | StructureZone
         | StructureSweepEvent
-        | StructureFailedBreakoutEvent,
+        | StructureFailedBreakoutEvent
+        | StructureFvgEvent,
         ...,
     ] = (),
 ) -> StudyResult:

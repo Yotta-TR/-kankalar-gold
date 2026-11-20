@@ -27,7 +27,7 @@ errors are persisted as non-computing study results with status and stable
 source/reason evidence. Invalid requests and unclassified exceptions still
 raise. The helper is an offline integration seam; it does not initialize MT5.
 
-SQLite migrations through schema v11 are transactional. Schema v4 upgrades
+SQLite migrations through schema v12 are transactional. Schema v4 upgrades
 quote/tick event identity, schema v5 adds append-only study events and result
 observations, schema v6 indexes the calendar-context cache identity, and schema
 v7 blocks `INSERT OR REPLACE` on matching study-event identities or
@@ -75,6 +75,21 @@ the parent result preserves source and snapshot context. Retain the same
 history start and calendar context for replay. A wick reclaim sweep is distinct:
 this study requires a close-confirmed breakout and a later close reclaim.
 It is descriptive only, with no volume strength, score, or trading advice.
+
+Register `StructureFvgStudy` with `StudyRegistry`; it takes no configuration
+and requires three completed bars. Use `StudyRunner` or
+`run_pipeline_study` with a `ValidatedBarSet`. Each exact three-bar window is
+evaluated independently; all three candles must be completed by `as_of_utc`.
+With an explicit validated `SessionCalendar`, neighboring bars may be treated
+as consecutive only when the interval between them is fully classified as
+closed. Without a calendar, timestamps must be exactly one timeframe apart.
+Missing expected bars and unknown calendar coverage do not emit events.
+Schema v12 atomically appends separate event and result-observation rows and
+guards updates, deletes, replacements and explicit rowid collisions. Parent
+results provide the snapshot and source provenance; event identity is stable
+when later bars are appended. FVGs are descriptive price imbalances only.
+Mitigation/fill, merging, ranking and out-of-sample predictive validation
+remain TBD.
 
 Register `BosChochStudy` with `StudyRegistry` and use `StudyRunner` or
 `run_pipeline_study` with explicit positive `left_bars` and `right_bars`.

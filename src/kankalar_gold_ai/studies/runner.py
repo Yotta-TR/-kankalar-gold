@@ -438,6 +438,7 @@ class StudyRunner:
                     input_source=prepared.input_source,
                     input_window_start_utc=prepared.input_window_start_utc,
                     input_window_end_utc=prepared.input_window_end_utc,
+                    calendar=bars.calendar,
                 ),
             )
         except Exception as error:

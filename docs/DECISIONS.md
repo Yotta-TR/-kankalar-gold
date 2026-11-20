@@ -1,5 +1,29 @@
 # Architecture Decisions
 
+## ADR-025: Three-candle price-imbalance events (Phase 2H)
+
+- **Decision:** `structure.gaps_fvg` v0.1.0 inspects each three-consecutive-bar
+  window in a `ValidatedBarSet`. A bullish event requires `third.low >
+  first.high`; a bearish event requires `third.high < first.low`. Equality is
+  excluded. Bounds are the two separating prices, and the event is known at
+  completion of the third candle. There are no body-size, displacement, volume,
+  ranking, merge or fill conditions.
+- **Continuity and identity:** Both neighboring pairs must be consecutive
+  expected tradable bars. A supplied validated `SessionCalendar` proves
+  continuity across fully known closures; otherwise exact timeframe adjacency
+  is required. Open or unknown intervals fail closed. Event IDs bind the study,
+  market, direction, bounds, all three candle times, source and calendar
+  context, but not the extendable full-input snapshot. Snapshot and source
+  observation provenance remain on the parent result; later result observations
+  cannot mutate the event.
+- **Persistence:** Schema v12 appends separate FVG event records and result
+  observations with transactional migration and update/delete/replace guards,
+  including explicit rowid collisions. Existing v5-v11 data remains unchanged.
+- **Scope:** These are descriptive price-imbalance patterns, not order-book
+  voids, evidence of institutional activity, signals or predictions.
+  Mitigation/fill, merging, ranking and out-of-sample predictive validation
+  remain **[TBD]**.
+
 ## ADR-024: Close-confirmed failed range breakouts (Phase 2G)
 
 - **Decision:** `structure.range_failed_breakout` v0.1.0 requires explicit

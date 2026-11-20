@@ -6,7 +6,7 @@ gold research. No trading logic or order execution is implemented.
 Phase 1A completes market-data contracts, offline quality checks, injectable
 read-only MT5 adapter, configuration-based provider selection, historical
 coverage validation, and an append-oriented versioned SQLite persistence layer
-(schema v11).
+(schema v12).
 Comprehensive testing with deterministic synthetic data verifies all components.
 This is research-only software; do not use for live market analysis.
 
@@ -92,7 +92,7 @@ and provider failures to persisted non-computing study results. The
 `volatility.atr`, `trend.ma_slope_order`, `trend.adx_dm`, `trend.rsi`, and
 `trend.roc_momentum`, `trend.macd`, `trend.donchian`, `structure.swings`,
 `structure.bos_choch`, `structure.sr_zones`, `structure.liquidity_sweep`,
-and `structure.range_failed_breakout`
+`structure.range_failed_breakout`, and `structure.gaps_fvg`
 studies and independent multi-timeframe coordination are
 descriptive research tools, not validated trading strategies. RSI describes
 its own movement, not a market regime; each ROC run uses one explicit horizon.
@@ -135,6 +135,15 @@ that frozen range within the explicit reclaim window. Wick-only excursions are
 not candidates. Schema v11 stores these separate immutable events and result
 observations. The study is descriptive only, without volume strength, scores,
 or trading recommendations.
+`structure.gaps_fvg` v0.1.0 identifies strict three-candle price imbalances
+from consecutive validated completed bars. A session calendar can establish
+expected tradable-bar continuity across known closures; without one, exact
+timeframe adjacency is required. Each qualifying window is a separate immutable
+event, known at the third candle's completion. Schema v12 stores append-only
+events and result observations. Source, snapshot and calendar provenance are
+available from the paired study result. Mitigation/fill, merging, ranking, and
+out-of-sample predictive validation remain TBD; an FVG does not indicate an
+order-book void or institutional activity.
 Strategies and runner scheduling remain unimplemented.
 
 The MT5 adapter has bounded connection/history retries and a timeout for

@@ -70,6 +70,7 @@ class ValidatedBarSet:
     calendar_identity_json: str | None
     calendar_context_id: str
     calendar_context_json: str
+    calendar: SessionCalendar | None
 
     def __init__(
         self,
@@ -146,6 +147,7 @@ class ValidatedBarSet:
         )
         object.__setattr__(self, "calendar_context_id", context_id)
         object.__setattr__(self, "calendar_context_json", identity_json)
+        object.__setattr__(self, "calendar", calendar)
 
     @classmethod
     def from_bars(
